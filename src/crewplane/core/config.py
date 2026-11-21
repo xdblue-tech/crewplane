@@ -242,6 +242,9 @@ class IntegrationsConfig(BaseModel):
             options={"log_cli_output": True},
         )
     )
+    status: IntegrationSpec = Field(
+        default_factory=lambda: IntegrationSpec(implementation="none")
+    )
 
 
 class FileAccessSettings(BaseModel):

@@ -37,6 +37,7 @@ def build_components_for_run(
         invoker_options=snapshot_result.invoker_options,
         artifact_options=snapshot_result.artifact_options,
         ui_options=snapshot_result.ui_options,
+        status_options=snapshot_result.status_options,
         artifact_store=artifact_store,
     )
 

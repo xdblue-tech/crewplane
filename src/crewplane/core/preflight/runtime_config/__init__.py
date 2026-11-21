@@ -256,6 +256,7 @@ class RuntimeConfigSnapshot(BaseModel):
     invoker: CanonicalIntegrationConfig
     artifacts: CanonicalIntegrationConfig
     ui: CanonicalIntegrationConfig
+    status: CanonicalIntegrationConfig
     validation: RuntimeValidationSnapshot = Field(
         default_factory=RuntimeValidationSnapshot
     )
@@ -283,6 +284,11 @@ class RuntimeConfigSnapshot(BaseModel):
         exclude=True,
         repr=False,
     )
+    raw_status: CanonicalIntegrationConfig | None = Field(
+        default=None,
+        exclude=True,
+        repr=False,
+    )
 
     @classmethod
     def build(
@@ -291,6 +297,7 @@ class RuntimeConfigSnapshot(BaseModel):
         invoker: CanonicalIntegrationConfig,
         artifacts: CanonicalIntegrationConfig,
         ui: CanonicalIntegrationConfig,
+        status: CanonicalIntegrationConfig,
         options: RuntimeConfigSnapshotOptions,
         file_access: FileAccessSettings | None = None,
     ) -> RuntimeConfigSnapshot:
@@ -313,7 +320,12 @@ class RuntimeConfigSnapshot(BaseModel):
         raw_workspace, sensitive_workspace_paths, redacted_workspace = (
             _prepare_workspace_config(settings.workspace)
         )
-        integrations = (("invoker", invoker), ("artifacts", artifacts), ("ui", ui))
+        integrations = (
+            ("invoker", invoker),
+            ("artifacts", artifacts),
+            ("ui", ui),
+            ("status", status),
+        )
         sensitive_paths = sorted(
             sensitive_agent_paths
             + sensitive_workspace_paths
@@ -330,7 +342,7 @@ class RuntimeConfigSnapshot(BaseModel):
         )
         if sensitive_paths:
             workspace = workspace.model_copy(update={"setup_profiles": setup_profiles})
-        redacted_invoker, redacted_artifacts, redacted_ui = (
+        redacted_invoker, redacted_artifacts, redacted_ui, redacted_status = (
             integration_with_sensitive_option_fingerprints(value, name, None)[0]
             for name, value in integrations
         )
@@ -345,6 +357,7 @@ class RuntimeConfigSnapshot(BaseModel):
             invoker=redacted_invoker,
             artifacts=redacted_artifacts,
             ui=redacted_ui,
+            status=redacted_status,
             validation=RuntimeValidationSnapshot(integrations_loaded=True),
             observer=RuntimeObserverSnapshot(
                 console_is_terminal=options.console_is_terminal, no_live=options.no_live
@@ -356,6 +369,7 @@ class RuntimeConfigSnapshot(BaseModel):
             raw_invoker=invoker,
             raw_artifacts=artifacts,
             raw_ui=ui,
+            raw_status=status,
             effective_runtime_config_signature=_effective_signature(
                 config.version,
                 execution,
@@ -373,6 +387,7 @@ class RuntimeConfigSnapshot(BaseModel):
         payload["invoker"] = self.invoker.redacted_payload()
         payload["artifacts"] = self.artifacts.redacted_payload()
         payload["ui"] = self.ui.redacted_payload()
+        payload["status"] = self.status.redacted_payload()
         return payload
 
     def with_sensitive_config_fingerprints(
@@ -428,6 +443,11 @@ class RuntimeConfigSnapshot(BaseModel):
             "ui",
             fingerprint_key,
         )
+        status, status_fingerprints = integration_with_sensitive_option_fingerprints(
+            self.raw_status or self.status,
+            "status",
+            fingerprint_key,
+        )
         all_fingerprints = sorted(
             [
                 *fingerprints,
@@ -435,6 +455,7 @@ class RuntimeConfigSnapshot(BaseModel):
                 *invoker_fingerprints,
                 *artifact_fingerprints,
                 *ui_fingerprints,
+                *status_fingerprints,
             ],
             key=lambda item: item["path"],
         )
@@ -444,6 +465,7 @@ class RuntimeConfigSnapshot(BaseModel):
                 "invoker": invoker,
                 "artifacts": artifacts,
                 "ui": ui,
+                "status": status,
                 "workspace": workspace,
                 "config_fingerprints": all_fingerprints,
                 "effective_runtime_config_signature": _effective_signature(

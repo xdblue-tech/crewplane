@@ -11,6 +11,7 @@ Adopt a ports-and-adapters runtime architecture for integration points:
 - `invoker`
 - `ui`
 - `artifacts`
+- `status`
 
 Use configuration-driven implementation selection under `settings.integrations` with:
 - alias-first resolution,
@@ -110,6 +111,7 @@ The prior structure had meaningful seams but orchestration wiring still hardcode
   - `invoker`: `cli`, `mock` (see [ADR 0003: Mock Invoker Adapter](0003-mock-invoker.md))
   - `ui`: `tmux`, `none`
   - `artifacts`: `filesystem`
+  - `status`: `osc7501`, `none`
 - **2026-06-07**: Folded boundary hardening decisions into this ADR. Runtime
   provider inference remains behind the invoker adapter boundary, ports expose
   neutral contracts, and prompt argv transport is an explicit opt-in.
@@ -129,6 +131,13 @@ The prior structure had meaningful seams but orchestration wiring still hardcode
 - **2026-08-12**: Added JSON Pointer declarations for nested adapter secrets.
 - **2026-09-14**: Documented CLI capability ownership, shared provider validation,
   and cleanup on success, failure, or cancellation.
+- **2026-11-21**: Added `status` as a fourth integration kind for program status
+  reporting to the hosting terminal (alias `osc7501`, default `none`). Status
+  emission is observer-only, independent of the `ui` kind and its live-terminal
+  gate, and carries its observer separately from UI observers so dashboard
+  availability and progress-output selection stay keyed to UI integration.
+  Status options are observational and excluded from the effective execution
+  signature, so toggling reporting does not invalidate saved results.
 
 ## Follow-ups
 1. Add `llm_api` invoker adapter.

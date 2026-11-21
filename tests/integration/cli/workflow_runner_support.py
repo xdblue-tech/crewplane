@@ -112,6 +112,7 @@ async def run_workflow(
     which_fn: Callable[[str], str | None] | None = None,
     execute_workflow_impl: Callable[..., Any] | None = None,
     observability_hub_cls: type[ObservabilityHub] | None = None,
+    no_live: bool = True,
 ) -> None:
     run_kwargs = {}
     if execute_workflow_impl is not None:
@@ -127,7 +128,7 @@ async def run_workflow(
             root_workflow_path=Path.cwd() / "workflow.task.md",
         ),
         force=force,
-        no_live=True,
+        no_live=no_live,
         console=console,
         which_fn=which_fn,
         **run_kwargs,

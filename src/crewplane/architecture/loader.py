@@ -9,13 +9,16 @@ from .ports import (
     ArtifactAdapterPort,
     ArtifactStorePort,
     InvokerAdapterPort,
+    StatusReporterPort,
     UIAdapterCapabilities,
     UIAdapterPort,
 )
 from .registry import INTEGRATION_ALIAS_REGISTRY, allowed_implementations
 
-IntegrationKind = Literal["invoker", "ui", "artifacts"]
-AdapterInstance = InvokerAdapterPort | UIAdapterPort | ArtifactAdapterPort
+IntegrationKind = Literal["invoker", "ui", "artifacts", "status"]
+AdapterInstance = (
+    InvokerAdapterPort | UIAdapterPort | ArtifactAdapterPort | StatusReporterPort
+)
 
 
 class ObjectPath(NamedTuple):
@@ -27,11 +30,13 @@ REQUIRED_FACTORY_METHOD: dict[IntegrationKind, str] = {
     "invoker": "create_invoker",
     "ui": "create_runtime",
     "artifacts": "create_store",
+    "status": "create_reporter",
 }
 ADDITIONAL_REQUIRED_FACTORY_METHODS: dict[IntegrationKind, tuple[str, ...]] = {
     "invoker": ("canonicalize_options",),
     "ui": ("canonicalize_options",),
     "artifacts": ("canonicalize_options", "create_terminal_history_reader"),
+    "status": ("canonicalize_options",),
 }
 
 
@@ -126,6 +131,13 @@ def load_adapter_class(
 ) -> type[UIAdapterPort]: ...
 
 
+@overload
+def load_adapter_class(
+    integration_kind: Literal["status"],
+    implementation: str,
+) -> type[StatusReporterPort]: ...
+
+
 def load_adapter_class(
     integration_kind: IntegrationKind,
     implementation: str,
@@ -204,6 +216,13 @@ def instantiate_adapter(
     integration_kind: Literal["ui"],
     implementation: str,
 ) -> UIAdapterPort: ...
+
+
+@overload
+def instantiate_adapter(
+    integration_kind: Literal["status"],
+    implementation: str,
+) -> StatusReporterPort: ...
 
 
 def instantiate_adapter(

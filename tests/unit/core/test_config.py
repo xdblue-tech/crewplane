@@ -606,6 +606,58 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "log_cli_output"):
             Settings(log_cli_output=True)
 
+    def test_settings_defaults_status_integration_to_none(self) -> None:
+        settings = Settings()
+
+        self.assertEqual(settings.integrations.status.implementation, "none")
+        self.assertEqual(settings.integrations.status.options, {})
+
+    def test_settings_accepts_status_integration_override(self) -> None:
+        settings = Settings.model_validate(
+            {"integrations": {"status": {"implementation": "osc7501"}}}
+        )
+
+        self.assertEqual(settings.integrations.status.implementation, "osc7501")
+
+    def test_settings_rejects_unknown_status_integration_key(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unsupported"):
+            Settings.model_validate(
+                {
+                    "integrations": {
+                        "status": {
+                            "implementation": "none",
+                            "unsupported": True,
+                        }
+                    }
+                }
+            )
+
+    def test_load_config_without_status_integration_keeps_none(self) -> None:
+        tmp_dir = mkdtemp(dir=self.tmp_path)
+        path = Path(tmp_dir) / "config.yml"
+        path.write_text(
+            "\n".join(
+                [
+                    f'version: "{SCHEMA_VERSION}"',
+                    "",
+                    "agents:",
+                    "  alpha:",
+                    '    cli_cmd: ["echo"]',
+                    '    default_model: "x"',
+                    "settings:",
+                    "  integrations:",
+                    "    ui:",
+                    '      implementation: "none"',
+                ]
+            ),
+            encoding="utf-8",
+            newline="\n",
+        )
+
+        config = load_config(path)
+
+        self.assertEqual(config.settings.integrations.status.implementation, "none")
+
     def test_settings_accepts_integration_overrides(self) -> None:
         settings = Settings(
             file_access={"allowed_template_paths": ["/tmp"]},

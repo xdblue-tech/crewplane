@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 from crewplane.architecture.contracts import AgentInvoker, RuntimeObserver
 from crewplane.architecture.ports.artifacts import ArtifactStorePort
+from crewplane.architecture.ports.status import StatusObserver
 
 
 @dataclass(frozen=True, init=False)
@@ -32,6 +33,7 @@ class RuntimeComponents:
     base_invoker: AgentInvoker
     observers: tuple[RuntimeObserver, ...]
     suppress_progress_output: bool
+    status_observer: StatusObserver | None = None
 
     def __init__(
         self,
@@ -39,9 +41,11 @@ class RuntimeComponents:
         base_invoker: AgentInvoker,
         observers: Iterable[RuntimeObserver],
         suppress_progress_output: bool,
+        status_observer: StatusObserver | None = None,
     ) -> None:
         """Freeze observers while retaining the selected invoker and store."""
         object.__setattr__(self, "artifact_store", artifact_store)
         object.__setattr__(self, "base_invoker", base_invoker)
         object.__setattr__(self, "observers", tuple(observers))
         object.__setattr__(self, "suppress_progress_output", suppress_progress_output)
+        object.__setattr__(self, "status_observer", status_observer)

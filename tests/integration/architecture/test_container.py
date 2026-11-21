@@ -13,6 +13,11 @@ from rich.console import Console
 import crewplane.adapters.ui.tmux as tmux_adapter_module
 from crewplane.adapters.artifacts.filesystem import FilesystemArtifactsAdapter
 from crewplane.adapters.invokers.mock import MockInvokerAdapter
+from crewplane.adapters.status import (
+    NullStatusObserver,
+    NullStatusReporter,
+    Osc7501StatusObserver,
+)
 from crewplane.adapters.ui.null import NullUIAdapter
 from crewplane.architecture.contracts import (
     CanonicalIntegrationConfig,
@@ -21,7 +26,7 @@ from crewplane.architecture.contracts import (
     build_findings_filename,
     build_result_filename,
 )
-from crewplane.architecture.errors import AdapterLoadError
+from crewplane.architecture.errors import AdapterContractError, AdapterLoadError
 from crewplane.architecture.ports import UIAdapterCapabilities
 from crewplane.architecture.ports.runtime import UIRuntimePlan
 from crewplane.bootstrap import (
@@ -146,6 +151,33 @@ class _ConformingObserverRuntime:
 
     def stop(self, result: object) -> None:  # noqa: ARG002 - Observer protocol.
         pass
+
+
+class _ConformingStatusObserver(_ConformingObserverRuntime):
+    capabilities = ObserverCapabilities(synchronous_snapshot_delivery=True)
+
+    def publish_terminal_status(self, result: object) -> None:  # noqa: ARG002
+        pass
+
+
+class _RequiredStatusObserver(_ConformingStatusObserver):
+    capabilities = ObserverCapabilities(
+        required=True, synchronous_snapshot_delivery=True
+    )
+
+
+class _AsyncDeliveryStatusObserver(_ConformingStatusObserver):
+    capabilities = ObserverCapabilities()
+
+
+class _StopRequestingStatusObserver(_ConformingStatusObserver):
+    @property
+    def stop_requested(self) -> bool:
+        return True
+
+
+class _TerminalPublishlessStatusObserver(_ConformingObserverRuntime):
+    capabilities = ObserverCapabilities(synchronous_snapshot_delivery=True)
 
 
 class ContainerTests(unittest.TestCase):
@@ -874,6 +906,212 @@ def test_ui_plan_preserves_runtime_dependencies_and_option_selection(
         assert selected_options is ui_options
     assert components.observers == (observer,)
     assert components.suppress_progress_output is True
+
+
+def test_status_reporter_is_created_independently_of_the_live_ui(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = Config(
+        version=SCHEMA_VERSION,
+        agents={"alpha": AgentConfig(cli_cmd=["mock"])},
+        settings=Settings(
+            integrations={
+                "invoker": {"implementation": "mock"},
+                "ui": {"implementation": "none"},
+                "status": {"implementation": "none"},
+            }
+        ),
+    )
+    console = Console(file=io.StringIO(), force_terminal=False)
+    reporter = _ConformingStatusObserver()
+    create_reporter = Mock(return_value=reporter)
+    monkeypatch.setattr(NullStatusReporter, "create_reporter", create_reporter)
+
+    components = build_runtime_components(
+        config,
+        topology_from_workflow(WorkflowPlan(name="status-plan", nodes=[])),
+        tmp_path / "state",
+        tmp_path,
+        console,
+        True,
+        status_options={"unsupported": True},
+    )
+
+    create_reporter.assert_called_once_with(
+        config=config,
+        run_id=components.artifact_store.run_id,
+        console=console,
+        options={"unsupported": True},
+    )
+    assert components.observers == ()
+    assert components.status_observer is reporter
+
+
+def test_status_options_default_to_a_copy_of_configured_options(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = Config(
+        version=SCHEMA_VERSION,
+        agents={"alpha": AgentConfig(cli_cmd=["mock"])},
+        settings=Settings(
+            integrations={
+                "invoker": {"implementation": "mock"},
+                "ui": {"implementation": "none"},
+                "status": {
+                    "implementation": "crewplane.adapters.status.null:NullStatusReporter",
+                    "options": {"unsupported": True},
+                },
+            }
+        ),
+    )
+    console = Console(file=io.StringIO(), force_terminal=True)
+    create_reporter = Mock(return_value=_ConformingStatusObserver())
+    monkeypatch.setattr(NullStatusReporter, "create_reporter", create_reporter)
+
+    build_runtime_components(
+        config,
+        topology_from_workflow(WorkflowPlan(name="status-options", nodes=[])),
+        tmp_path / "state",
+        tmp_path,
+        console,
+        True,
+    )
+
+    selected_options = create_reporter.call_args.kwargs["options"]
+    assert selected_options == {"unsupported": True}
+    assert selected_options is not config.settings.integrations.status.options
+
+
+@pytest.mark.parametrize(
+    ("observer_factory", "match"),
+    [
+        (_RequiredStatusObserver, "required=True"),
+        (_AsyncDeliveryStatusObserver, "synchronous_snapshot_delivery=True"),
+        (_StopRequestingStatusObserver, "stop_requested"),
+        (_TerminalPublishlessStatusObserver, "publish_terminal_status"),
+    ],
+)
+def test_status_adapter_rejects_observers_outside_the_status_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    observer_factory: type[_ConformingObserverRuntime],
+    match: str,
+) -> None:
+    config = Config(
+        version=SCHEMA_VERSION,
+        agents={"alpha": AgentConfig(cli_cmd=["mock"])},
+        settings=Settings(
+            integrations={
+                "invoker": {"implementation": "mock"},
+                "ui": {"implementation": "none"},
+                "status": {"implementation": "none"},
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        NullStatusReporter,
+        "create_reporter",
+        Mock(return_value=observer_factory()),
+    )
+
+    with pytest.raises(AdapterContractError, match=match):
+        build_runtime_components(
+            config,
+            topology_from_workflow(WorkflowPlan(name="status-contract", nodes=[])),
+            tmp_path / "state",
+            tmp_path,
+            Console(file=io.StringIO(), force_terminal=False),
+            True,
+        )
+
+
+def test_status_adapter_accepts_a_best_effort_synchronous_observer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = Config(
+        version=SCHEMA_VERSION,
+        agents={"alpha": AgentConfig(cli_cmd=["mock"])},
+        settings=Settings(
+            integrations={
+                "invoker": {"implementation": "mock"},
+                "ui": {"implementation": "none"},
+                "status": {"implementation": "none"},
+            }
+        ),
+    )
+    reporter = _ConformingStatusObserver()
+    monkeypatch.setattr(
+        NullStatusReporter,
+        "create_reporter",
+        Mock(return_value=reporter),
+    )
+
+    components = build_runtime_components(
+        config,
+        topology_from_workflow(WorkflowPlan(name="status-accepted", nodes=[])),
+        tmp_path / "state",
+        tmp_path,
+        Console(file=io.StringIO(), force_terminal=False),
+        True,
+    )
+
+    assert components.status_observer is reporter
+
+
+def test_default_status_integration_creates_a_silent_observer(
+    tmp_path: Path,
+) -> None:
+    config = Config(
+        version=SCHEMA_VERSION,
+        agents={"alpha": AgentConfig(cli_cmd=["mock"])},
+        settings=Settings(
+            integrations={
+                "invoker": {"implementation": "mock"},
+                "ui": {"implementation": "none"},
+            }
+        ),
+    )
+    stream = io.StringIO()
+
+    components = build_runtime_components(
+        config,
+        topology_from_workflow(WorkflowPlan(name="status-default", nodes=[])),
+        tmp_path / "state",
+        tmp_path,
+        Console(file=stream, force_terminal=True, color_system=None),
+        True,
+    )
+
+    assert isinstance(components.status_observer, NullStatusObserver)
+    assert components.status_observer.capabilities.required is False
+
+
+def test_osc7501_status_adapter_is_selectable_by_alias(tmp_path: Path) -> None:
+    config = Config(
+        version=SCHEMA_VERSION,
+        agents={"alpha": AgentConfig(cli_cmd=["mock"])},
+        settings=Settings(
+            integrations={
+                "invoker": {"implementation": "mock"},
+                "ui": {"implementation": "none"},
+                "status": {"implementation": "osc7501"},
+            }
+        ),
+    )
+
+    components = build_runtime_components(
+        config,
+        topology_from_workflow(WorkflowPlan(name="status-alias", nodes=[])),
+        tmp_path / "state",
+        tmp_path,
+        Console(file=io.StringIO(), force_terminal=True),
+        True,
+    )
+
+    assert isinstance(components.status_observer, Osc7501StatusObserver)
 
 
 @pytest.mark.parametrize("use_warning_sink", [False, True])

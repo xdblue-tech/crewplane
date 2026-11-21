@@ -39,6 +39,16 @@ class ArtifactsWithoutTerminalHistoryReader:
         return None
 
 
+class StatusWithoutCanonicalOptions:
+    def create_reporter(self):  # type: ignore[no-untyped-def]
+        return None
+
+
+class StatusWithoutReporter:
+    def canonicalize_options(self):  # type: ignore[no-untyped-def]
+        return None
+
+
 class InvokerWithStaticFactories:
     @staticmethod
     def canonicalize_options(
@@ -88,6 +98,16 @@ class LoaderTests(unittest.TestCase):
         self.assertEqual(
             resolved,
             "crewplane.adapters.invokers.mock:MockInvokerAdapter",
+        )
+
+    def test_resolve_status_aliases_to_builtin_paths(self) -> None:
+        self.assertEqual(
+            resolve_implementation_path("status", "none"),
+            "crewplane.adapters.status.null:NullStatusReporter",
+        )
+        self.assertEqual(
+            resolve_implementation_path("status", "osc7501"),
+            "crewplane.adapters.status.osc7501:Osc7501StatusReporter",
         )
 
     def test_resolve_supports_dotted_override(self) -> None:
@@ -172,6 +192,37 @@ class LoaderTests(unittest.TestCase):
                 "artifacts",
                 f"{__name__}:ArtifactsWithoutTerminalHistoryReader",
             )
+
+    def test_status_contract_requires_canonical_options(self) -> None:
+        with self.assertRaisesRegex(AdapterContractError, "canonicalize_options"):
+            load_adapter_class(
+                "status",
+                f"{__name__}:StatusWithoutCanonicalOptions",
+            )
+
+    def test_status_contract_requires_reporter_factory(self) -> None:
+        with self.assertRaisesRegex(AdapterContractError, "create_reporter"):
+            load_adapter_class(
+                "status",
+                f"{__name__}:StatusWithoutReporter",
+            )
+
+    def test_status_contract_rejects_ui_adapter(self) -> None:
+        with self.assertRaisesRegex(AdapterContractError, "create_reporter"):
+            load_adapter_class(
+                "status",
+                "crewplane.adapters.ui.null:NullUIAdapter",
+            )
+
+    def test_instantiate_status_adapter_returns_instance(self) -> None:
+        self.assertEqual(
+            instantiate_adapter("status", "none").__class__.__name__,
+            "NullStatusReporter",
+        )
+        self.assertEqual(
+            instantiate_adapter("status", "osc7501").__class__.__name__,
+            "Osc7501StatusReporter",
+        )
 
     def test_invalid_colon_path_raises_clear_error(self) -> None:
         with self.assertRaisesRegex(AdapterLoadError, "Invalid implementation path"):

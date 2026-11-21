@@ -4,6 +4,12 @@ All notable user-facing changes are recorded here.
 
 ## [Unreleased]
 
+### Added
+
+- Report workflow lifecycle to hosting terminals with the opt-in `osc7501` status
+  integration (`settings.integrations.status`), so tools that track program
+  status show real run progress; the default `none` leaves output unchanged.
+
 ### Changed
 
 - Find the nearest Crewplane project from descendant directories for validation, runs, and workspace cleanup.

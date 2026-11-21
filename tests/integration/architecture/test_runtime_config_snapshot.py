@@ -32,6 +32,8 @@ def _config(
     workspace: dict[str, object] | None = None,
     ui_implementation: str = "none",
     ui_options: dict[str, object] | None = None,
+    status_implementation: str = "none",
+    status_options: dict[str, object] | None = None,
 ) -> Config:
     selected_agent_config = (
         AgentConfig(cli_cmd=["mock"]) if agent_config is None else agent_config
@@ -57,6 +59,10 @@ def _config(
                 ui=IntegrationSpec(
                     implementation=ui_implementation,
                     options={} if ui_options is None else ui_options,
+                ),
+                status=IntegrationSpec(
+                    implementation=status_implementation,
+                    options={} if status_options is None else status_options,
                 ),
             ),
         ),
@@ -366,6 +372,60 @@ def test_snapshot_resolves_inactive_ui_implementation() -> None:
         )
 
 
+def test_snapshot_validates_inactive_status_configuration() -> None:
+    with pytest.raises(ValueError, match="osc7501 status implementation"):
+        build_runtime_config_snapshot(
+            project_root=Path.cwd(),
+            config=_config(
+                status_implementation="osc7501",
+                status_options={"unsupported": True},
+            ),
+            console=Console(file=None),
+            no_live=True,
+        )
+
+
+def test_snapshot_resolves_inactive_status_implementation() -> None:
+    with pytest.raises(
+        IntegrationResolutionError, match="Unknown status implementation"
+    ):
+        build_runtime_config_snapshot(
+            project_root=Path.cwd(),
+            config=_config(status_implementation="missing"),
+            console=Console(file=None),
+            no_live=True,
+        )
+
+
+@pytest.mark.parametrize("status_implementation", ["none", "osc7501"])
+def test_status_configuration_is_excluded_from_runtime_signature(
+    status_implementation: str,
+) -> None:
+    console = Console(file=None)
+    default_snapshot = build_runtime_config_snapshot(
+        project_root=Path.cwd(),
+        config=_config(),
+        console=console,
+        no_live=True,
+    ).snapshot
+    selected_snapshot = build_runtime_config_snapshot(
+        project_root=Path.cwd(),
+        config=_config(status_implementation=status_implementation),
+        console=console,
+        no_live=False,
+    ).snapshot
+
+    assert (
+        selected_snapshot.effective_runtime_config_signature
+        == default_snapshot.effective_runtime_config_signature
+    )
+    assert (
+        selected_snapshot.redacted_payload()["status"]["implementation"]
+        == status_implementation
+    )
+    assert default_snapshot.redacted_payload()["status"]["implementation"] == "none"
+
+
 def test_canonical_options_require_exact_signature_scopes() -> None:
     with pytest.raises(ValueError, match="missing scopes"):
         CanonicalIntegrationConfig(
@@ -465,6 +525,7 @@ def test_canonical_options_support_json_pointer_escaped_top_level_names() -> Non
         invoker=round_tripped,
         artifacts=neutral_integration,
         ui=neutral_integration,
+        status=neutral_integration,
         options=RuntimeConfigSnapshotOptions(no_live=True),
     ).with_sensitive_config_fingerprints(b"f" * 32)
 

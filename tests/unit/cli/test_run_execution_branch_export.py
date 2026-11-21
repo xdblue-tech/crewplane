@@ -561,5 +561,6 @@ def _runtime_snapshot() -> RuntimeConfigSnapshot:
         invoker=integration,
         artifacts=integration,
         ui=integration,
+        status=integration,
         options=RuntimeConfigSnapshotOptions(no_live=True),
     )

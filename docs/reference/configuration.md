@@ -289,6 +289,8 @@ before starting provider commands.
 | `settings.integrations.ui.options` | JSON-compatible UI options. |
 | `settings.integrations.artifacts.implementation` | Artifact alias or dotted path. Defaults to `filesystem`. |
 | `settings.integrations.artifacts.options` | JSON-compatible artifact options. |
+| `settings.integrations.status.implementation` | Status alias or dotted path. Defaults to `none`. |
+| `settings.integrations.status.options` | JSON-compatible status options. |
 
 ## Built-In Integration Options
 
@@ -349,6 +351,27 @@ does not start or validate that command.
 Disables the live UI adapter. Runs still execute normally and write artifacts and
 logs, but no tmux dashboard or other live observers are created. It has no
 options.
+
+### `osc7501` status
+
+Reports workflow lifecycle to a terminal host as Program Status Protocol
+segments: the OSC introducer `ESC ] 7501 ;`, then `key=value` pairs separated by
+`:`, then an ESC plus backslash string terminator. It is independent of
+the live UI, so it works with `--no-live`. Each run reports `working` while it
+executes and exactly one terminal state: `done` on success, `error` on failure,
+or `idle` on cancellation. Only interactive terminals receive the sequences.
+
+```yaml
+settings:
+  integrations:
+    status:
+      implementation: "osc7501"
+```
+
+### `none` status
+
+Disables status reporting. It is the default and leaves terminal output
+unchanged.
 
 ### `filesystem` artifacts
 

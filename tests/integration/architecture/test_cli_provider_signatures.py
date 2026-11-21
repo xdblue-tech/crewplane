@@ -85,6 +85,8 @@ def test_observation_and_generic_only_model_arg_do_not_change_plugin_identity(
     config.settings.integrations.ui.options = {"quiet_after_seconds": 7}
     # tmux options remain observational even when live presentation is disabled.
     config.settings.integrations.ui.implementation = "tmux"
+    # Status reporting is observational too; toggling it must not invalidate reuse.
+    config.settings.integrations.status.implementation = "osc7501"
     assert signature(config, tmp_path) == before
 
 

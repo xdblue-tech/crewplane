@@ -18,6 +18,7 @@ For task-oriented setup, use [Provider setup](../getting-started/provider-setup.
 | Live dashboard | `tmux` UI |
 | No live UI | `none` UI |
 | Local run records | `filesystem` artifacts |
+| Status reporting to a terminal host | `osc7501` status |
 
 These aliases are valid values for
 `settings.integrations.<kind>.implementation`:
@@ -27,6 +28,7 @@ These aliases are valid values for
 | `invoker` | `cli`, `mock` |
 | `ui` | `tmux`, `none` |
 | `artifacts` | `filesystem` |
+| `status` | `osc7501`, `none` |
 
 Aliases resolve through the internal registry. An external adapter can also be
 selected with `package.module:ClassName` or `package.module.ClassName`.
@@ -197,6 +199,55 @@ The `none` UI disables live observers.
 
 Options: none.
 
+## Status
+
+Status integrations report workflow lifecycle to the terminal that hosts the
+run. They are independent of the `ui` integration: reporting works with
+`--no-live`, in a plain terminal, and under a host that owns the terminal.
+
+### `osc7501`
+
+The `osc7501` status integration writes Program Status Protocol sequences to
+stdout for hosts such as [herdr-core](https://github.com/herdrdev/herdr-core),
+which track them without screen scraping:
+
+```
+ESC ] 7501 ; state=working : app=crewplane : msg=<base64> ESC \
+```
+
+| Field | Meaning |
+| --- | --- |
+| `state` | `working` during the run; `done`, `error`, or `idle` once at the end. |
+| `app` | Always `crewplane`. |
+| `msg` | Base64-encoded one-line activity label: the workflow name, or the running node id. Absent on terminal states. |
+
+A successful run ends with `state=done`, a failed run with `state=error`, and a
+cancelled run with `state=idle`. `working` is deduplicated as a whole sequence,
+so it repeats whenever the activity label changes; the terminal state is reported
+at most once per run. The terminal state is written only after the outcome is
+final, once required observers have stopped and manifest publication has
+resolved, so a late failure reports `error` rather than a premature `done`.
+Crewplane never reports the protocol `blocked` state, because its own node-blocked
+event is an internal dependency wait, and it reports no progress percentage.
+
+Options: none.
+
+Sequences are written only when the injected console is a terminal. Piped and CI
+output stays byte-identical, so nothing changes unless a host terminal is
+present. A failed write disables reporting for the rest of the run with a
+warning; execution, artifacts, and the event log are unaffected. A failure while
+writing the terminal state is warn-only for the same reason.
+
+Status covers runs that reach observed execution. Failures before the reporter
+is created, such as config or context loading errors and run-lock contention,
+report no status; use the process exit code and the run manifest instead.
+
+### `none`
+
+The `none` status integration disables status reporting. It is the default.
+
+Options: none.
+
 ## Artifacts
 
 ### `filesystem`
@@ -236,6 +287,13 @@ Observers implement the architecture `Observer` lifecycle contract and expose
 one immutable `ObserverCapabilities` value. Runtime observers receive the
 architecture `ExecutionEvent`, `DashboardSnapshot`, and `RunResult` contracts.
 Composition validates `capabilities`, `stop_requested`, `start`, `on_snapshot`,
-and `stop` before a run begins. Persistent required observers and best-effort UI
+and `stop` before a run begins. Status integrations return an observer from
+`create_reporter()`; those observers are best effort, receive snapshots
+synchronously, and are carried separately from UI observers. Composition rejects
+a status observer that declares `required=True`, defers snapshot delivery, or
+requests run cancellation, and it publishes the terminal status through a
+separate method after the run outcome is final. The run path also pins that
+contract for the observer's whole lifecycle, so a status observer cannot request
+cancellation after it starts. Persistent required observers and best-effort UI
 observers express their delivery and cleanup behavior through that capability
 value rather than dynamic attributes.

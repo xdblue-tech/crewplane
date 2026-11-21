@@ -8,7 +8,8 @@ from pathlib import Path
 from rich.console import Console
 
 from crewplane.adapters.invokers.mock_invoker.options import bind_project_options
-from crewplane.architecture.contracts import JsonObject
+from crewplane.architecture.contracts import JsonObject, ObserverCapabilities
+from crewplane.architecture.errors import AdapterContractError
 from crewplane.architecture.loader import (
     instantiate_adapter,
     is_builtin_implementation,
@@ -18,6 +19,8 @@ from crewplane.architecture.loader import (
 from crewplane.architecture.ports import (
     ArtifactStorePort,
     InvokerAdapterPort,
+    StatusObserver,
+    StatusReporterPort,
     UIAdapterPort,
 )
 from crewplane.architecture.ports.runtime import RuntimeComponents, UIRuntimePlan
@@ -37,6 +40,7 @@ def build_runtime_components(
     invoker_options: JsonObject | None = None,
     artifact_options: JsonObject | None = None,
     ui_options: JsonObject | None = None,
+    status_options: JsonObject | None = None,
     artifact_store: ArtifactStorePort | None = None,
 ) -> RuntimeComponents:
     """Assemble an invoker, artifact store, and optional live observer plan.
@@ -45,7 +49,8 @@ def build_runtime_components(
     fixture paths to ``project_root``, and canonicalize through the adapter.
     Supplied options pass directly to invoker construction without those steps.
 
-    Load the invoker and eligible UI adapters before preparing the invoker.
+    Load the invoker, status, and eligible UI adapters before preparing the
+    invoker.
     Create and validate the invoker before selecting the artifact store. Without
     ``artifact_store``, create a store using ``artifact_options`` or a copy of
     configured options; the default filesystem store reserves run state here.
@@ -54,15 +59,18 @@ def build_runtime_components(
 
     Plan live UI only for a terminal when ``no_live`` is false. Missing required
     CLI logs emit a warning and skip UI construction, including UI options.
-    Otherwise, use ``ui_options`` or a copy of configured options. Return
-    observers without starting them. Errors propagate without rolling back
-    an already allocated store.
+    Otherwise, use ``ui_options`` or a copy of configured options. Create the
+    status reporter regardless of the live UI gate, because status reporting
+    only depends on the status integration and ``status_options``; keep its
+    observer separate from UI observers. Return observers without starting
+    them. Errors propagate without rolling back an already allocated store.
     """
 
     settings = config.settings
 
     artifacts_spec = settings.integrations.artifacts
     invoker_spec = settings.integrations.invoker
+    status_spec = settings.integrations.status
     ui_spec = settings.integrations.ui
     live_ui_enabled = console.is_terminal and not no_live
 
@@ -70,6 +78,7 @@ def build_runtime_components(
     ui_adapter = (
         instantiate_adapter("ui", ui_spec.implementation) if live_ui_enabled else None
     )
+    status_adapter = instantiate_adapter("status", status_spec.implementation)
 
     invoker_options = _prepare_invoker_options(
         invoker_adapter, invoker_spec, project_root, invoker_options
@@ -116,7 +125,74 @@ def build_runtime_components(
         base_invoker=base_invoker,
         observers=ui_runtime.observers,
         suppress_progress_output=ui_runtime.suppress_progress_output,
+        status_observer=_create_status_reporter(
+            status_adapter,
+            status_spec,
+            config,
+            resolved_artifact_store,
+            console,
+            status_options,
+        ),
     )
+
+
+def _create_status_reporter(
+    status_adapter: StatusReporterPort,
+    status_spec: IntegrationSpec,
+    config: Config,
+    artifact_store: ArtifactStorePort,
+    console: Console,
+    options: JsonObject | None,
+) -> StatusObserver:
+    status_observer = status_adapter.create_reporter(
+        config=config,
+        run_id=artifact_store.run_id,
+        console=console,
+        options=options if options is not None else dict(status_spec.options),
+    )
+    _validate_status_observer_contract(status_observer, status_spec.implementation)
+    return status_observer
+
+
+def _validate_status_observer_contract(
+    observer: object,
+    implementation: str,
+) -> None:
+    """Reject status observers that can affect execution instead of observing it."""
+    capabilities = getattr(observer, "capabilities", None)
+    if not isinstance(capabilities, ObserverCapabilities):
+        raise AdapterContractError(
+            f"Status adapter '{implementation}' must return an observer that declares "
+            "ObserverCapabilities."
+        )
+    if capabilities.required:
+        raise AdapterContractError(
+            f"Status adapter '{implementation}' returned an observer that declares "
+            "required=True; status reporting is best effort and cannot fail a run."
+        )
+    if not capabilities.synchronous_snapshot_delivery:
+        raise AdapterContractError(
+            f"Status adapter '{implementation}' returned an observer that does not "
+            "declare synchronous_snapshot_delivery=True; status reporting must not "
+            "defer delivery."
+        )
+    stop_requested = getattr(observer, "stop_requested", None)
+    if stop_requested is None or not isinstance(stop_requested, bool):
+        raise AdapterContractError(
+            f"Status adapter '{implementation}' must return an observer that declares "
+            "a bool stop_requested property."
+        )
+    if stop_requested:
+        raise AdapterContractError(
+            f"Status adapter '{implementation}' returned an observer whose "
+            "stop_requested property requests run cancellation; status reporting "
+            "must not stop a run."
+        )
+    if not callable(getattr(observer, "publish_terminal_status", None)):
+        raise AdapterContractError(
+            f"Status adapter '{implementation}' returned an observer without callable "
+            "publish_terminal_status"
+        )
 
 
 def _prepare_invoker_options(

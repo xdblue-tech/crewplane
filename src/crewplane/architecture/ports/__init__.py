@@ -11,6 +11,7 @@ from .artifacts import (
 from .invoker import InvokerAdapterPort
 from .options import IntegrationOptionsCanonicalizerPort
 from .runtime import RuntimeComponents, UIRuntimePlan
+from .status import StatusObserver, StatusReporterPort
 from .ui import UIAdapterCapabilities, UIAdapterPort
 
 __all__ = [
@@ -22,6 +23,8 @@ __all__ = [
     "ProviderProcessPublication",
     "ProviderProcessStorePort",
     "RunSummaryArtifactReaderPort",
+    "StatusObserver",
+    "StatusReporterPort",
     "TerminalHistoryRead",
     "TerminalHistoryReaderPort",
     "RuntimeComponents",

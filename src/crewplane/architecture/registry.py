@@ -19,6 +19,10 @@ _INTEGRATION_ALIASES: dict[str, dict[str, str]] = {
             "crewplane.adapters.artifacts.filesystem:FilesystemArtifactsAdapter"
         ),
     },
+    "status": {
+        "none": "crewplane.adapters.status.null:NullStatusReporter",
+        "osc7501": "crewplane.adapters.status.osc7501:Osc7501StatusReporter",
+    },
 }
 INTEGRATION_ALIAS_REGISTRY: Mapping[str, Mapping[str, str]] = MappingProxyType(
     {

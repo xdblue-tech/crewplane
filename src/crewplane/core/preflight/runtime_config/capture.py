@@ -183,6 +183,8 @@ def _raw_integration_config_value(
         integration = runtime_snapshot.raw_artifacts
     elif parts[:3] == ["integrations", "ui", "options"]:
         integration = runtime_snapshot.raw_ui
+    elif parts[:3] == ["integrations", "status", "options"]:
+        integration = runtime_snapshot.raw_status
     else:
         return False, None
     return _value_at_path(integration.options if integration else {}, parts[3:])

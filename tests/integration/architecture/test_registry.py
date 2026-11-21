@@ -13,11 +13,14 @@ class RegistryTests(unittest.TestCase):
         self.assertIn("tmux", INTEGRATION_ALIAS_REGISTRY["ui"])
         self.assertIn("none", INTEGRATION_ALIAS_REGISTRY["ui"])
         self.assertIn("filesystem", INTEGRATION_ALIAS_REGISTRY["artifacts"])
+        self.assertIn("none", INTEGRATION_ALIAS_REGISTRY["status"])
+        self.assertIn("osc7501", INTEGRATION_ALIAS_REGISTRY["status"])
 
     def test_allowed_implementations_returns_sorted_aliases(self) -> None:
         self.assertEqual(allowed_implementations("invoker"), ["cli", "mock"])
         self.assertEqual(allowed_implementations("ui"), ["none", "tmux"])
         self.assertEqual(allowed_implementations("artifacts"), ["filesystem"])
+        self.assertEqual(allowed_implementations("status"), ["none", "osc7501"])
 
     def test_allowed_implementations_unknown_kind_returns_empty(self) -> None:
         self.assertEqual(allowed_implementations("missing"), [])

@@ -411,7 +411,8 @@ constraints live in [AGENTS.md](AGENTS.md#change-guidance).
 ### Observability and tmux UI
 
 - Core files: `src/crewplane/observability/`, `src/crewplane/adapters/ui/`
-- Expected tests: `tests/integration/observability/`, `tests/unit/observability/`, `tests/integration/adapters/test_ui_tmux.py`, `tests/integration/adapters/test_ui_null.py`
+- Status reporting adapters: `src/crewplane/adapters/status/`
+- Expected tests: `tests/integration/observability/`, `tests/unit/observability/`, `tests/integration/adapters/test_ui_tmux.py`, `tests/integration/adapters/test_ui_null.py`, `tests/unit/adapters/test_status_osc7501.py`, `tests/integration/cli/test_status_reporting.py`
 
 ## Testing Expectations
 

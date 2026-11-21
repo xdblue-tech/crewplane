@@ -54,6 +54,12 @@ _EXPECTED_NESTED_ADAPTER_FINGERPRINTS = {
     "/integrations/ui/options/routes/1/auth~1config/value~0raw": (
         "f69d3938772b7eeb7bfb92506b53a2409905aadb984203a286499a409c56416e"
     ),
+    "/integrations/status/options/routes/0/api_token": (
+        "387aa381d84610dfe52624e1c7474e8bfd08734048a3c9a6fefe3d29eba90bb5"
+    ),
+    "/integrations/status/options/routes/1/auth~1config/value~0raw": (
+        "216d5087ad97a9ad0465bd84257aa924e4cfbb84b3f344db42c859582cffcc6b"
+    ),
 }
 
 
@@ -98,6 +104,7 @@ def _runtime_snapshot_with_nested_adapter_secrets(
             secret_version,
         ),
         ui=_nested_secret_integration("ui", "observer", secret_version),
+        status=_nested_secret_integration("status", "observer", secret_version),
         options=RuntimeConfigSnapshotOptions(no_live=True),
     )
 
@@ -164,7 +171,7 @@ def test_nested_adapter_secrets_stay_out_of_serialized_preflight_surfaces(
         repr(preview.diagnostics),
     ]
 
-    for integration_name in ("invoker", "artifacts", "ui"):
+    for integration_name in ("invoker", "artifacts", "ui", "status"):
         pattern_secret = f"{integration_name}-pattern-first"
         explicit_secret = f"{integration_name}-explicit-first"
         assert all(pattern_secret not in surface for surface in serialized_surfaces)
@@ -204,14 +211,14 @@ def test_nested_adapter_secrets_stay_out_of_serialized_preflight_surfaces(
 
     expected_paths = sorted(
         f"/integrations/{integration_name}/options/routes/{suffix}"
-        for integration_name in ("invoker", "artifacts", "ui")
+        for integration_name in ("invoker", "artifacts", "ui", "status")
         for suffix in ("0/api_token", "1/auth~1config/value~0raw")
     )
     assert plan.runtime_config_snapshot["sensitive_config_paths"] == expected_paths
     assert plan.runtime_config_snapshot["config_fingerprints"] == sorted(
         [
             fingerprint
-            for integration_name in ("invoker", "artifacts", "ui")
+            for integration_name in ("invoker", "artifacts", "ui", "status")
             for fingerprint in plan.runtime_config_snapshot[integration_name][
                 "option_fingerprints"
             ]
@@ -255,7 +262,7 @@ def test_nested_adapter_secrets_are_redacted_on_preflight_failure(
     )
 
     assert preview.has_errors()
-    for integration_name in ("invoker", "artifacts", "ui"):
+    for integration_name in ("invoker", "artifacts", "ui", "status"):
         for secret_kind in ("pattern", "explicit"):
             raw_secret = f"{integration_name}-{secret_kind}-failure"
             assert raw_secret not in preview.model_dump_json()
@@ -265,7 +272,7 @@ def test_nested_adapter_secrets_are_redacted_on_preflight_failure(
 
 @pytest.mark.parametrize(
     ("integration_name", "signature_changes"),
-    [("invoker", True), ("artifacts", True), ("ui", False)],
+    [("invoker", True), ("artifacts", True), ("ui", False), ("status", False)],
 )
 def test_nested_adapter_secret_fingerprints_change_only_effective_signatures(
     tmp_path: Path,
@@ -277,11 +284,13 @@ def test_nested_adapter_secret_fingerprints_change_only_effective_signatures(
         "invoker": _nested_secret_integration("invoker", "execution", "first"),
         "artifacts": _nested_secret_integration("artifacts", "artifact", "first"),
         "ui": _nested_secret_integration("ui", "observer", "first"),
+        "status": _nested_secret_integration("status", "observer", "first"),
     }
     scope = {
         "invoker": "execution",
         "artifacts": "artifact",
         "ui": "observer",
+        "status": "observer",
     }[integration_name]
     second_integrations[integration_name] = _nested_secret_integration(
         integration_name,
@@ -294,6 +303,7 @@ def test_nested_adapter_secret_fingerprints_change_only_effective_signatures(
         invoker=second_integrations["invoker"],
         artifacts=second_integrations["artifacts"],
         ui=second_integrations["ui"],
+        status=second_integrations["status"],
         options=RuntimeConfigSnapshotOptions(no_live=True),
     )
     second = compile_preflight_preview(

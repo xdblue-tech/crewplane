@@ -95,6 +95,34 @@ class _ConformingObserverStub:
         pass
 
 
+class _CountOnlyHub:
+    """Simulate a hub that only exposes the active-observer count."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        self._hub = ObservabilityHub(**kwargs)
+
+    @property
+    def active_observer_count(self) -> int:
+        return self._hub.active_observer_count
+
+    @property
+    def stop_requested(self) -> bool:
+        return self._hub.stop_requested
+
+    def __enter__(self) -> Any:
+        self._hub.__enter__()
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self._hub.__exit__(*args)  # type: ignore[arg-type]
+
+    def emit(self, event: object) -> None:
+        self._hub.emit(event)  # type: ignore[arg-type]
+
+    def set_terminal_result(self, result: object) -> None:
+        self._hub.set_terminal_result(result)  # type: ignore[arg-type]
+
+
 class CliLiveDashboardTests(unittest.TestCase):
     @pytest.fixture(autouse=True)
     def temporary_directory_root(self, tmp_path: Path) -> None:
@@ -489,7 +517,8 @@ class CliLiveDashboardTests(unittest.TestCase):
                 cli.execute_workflow = original_execute_workflow  # type: ignore[assignment]
                 cli.Console = original_console_cls
 
-            self.assertEqual(captured_live_config["observer_count"], 2)
+            # Persistent logger, tmux observer, and the default no-op status observer.
+            self.assertEqual(captured_live_config["observer_count"], 3)
             self.assertEqual(captured_live_config["refresh_per_second"], 0)
             self.assertEqual(captured_live_config["auto_close_session"], False)
             self.assertEqual(captured_live_config["quiet_after_seconds"], 180.0)
@@ -653,4 +682,172 @@ class CliLiveDashboardTests(unittest.TestCase):
 
             self.assertIn("invoker", captured_kwargs)
             self.assertIn("event_sink", captured_kwargs)
-            self.assertIn("live dashboard unavailable", stream.getvalue())
+            self.assertIn(
+                "live dashboard unavailable; continuing without live dashboard",
+                stream.getvalue(),
+            )
+
+    @requires_tmux_support
+    def test_hub_without_activity_check_ignores_the_status_observer(self) -> None:
+        with temporary_project_cwd(self.tmp_path) as tmp_path:
+            config_path = tmp_path / "config.yml"
+            workflow_path = tmp_path / "workflow.task.md"
+            write_basic_config(config_path)
+            write_basic_workflow(workflow_path)
+
+            stream = io.StringIO()
+            original_console_cls = cli.Console
+            original_execute_workflow = cli.execute_workflow
+            original_hub = cli.ObservabilityHub
+            original_which = shutil.which
+            import crewplane.adapters.ui.tmux as tmux_adapter_module
+
+            original_runtime_class = tmux_adapter_module.TmuxCompactRuntime
+
+            async def fake_execute_workflow(plan, output, **kwargs):  # type: ignore[no-untyped-def]  # noqa: ARG001 - Required by test double or callback signature.
+                return plan
+
+            class FailingStartObserver(_ConformingObserverStub):
+                def __init__(  # type: ignore[no-untyped-def]
+                    self,
+                    auto_close_session=True,
+                    tmux_executable="tmux",
+                    warning_sink=None,
+                    quiet_after_seconds=120.0,
+                    log_tail_lines=None,
+                ):
+                    pass
+
+                def start(self, context: object) -> None:
+                    del context
+                    raise RuntimeError("dashboard observer start failed")
+
+            cli.Console = ConsoleFactory(
+                file=stream,
+                force_terminal=True,
+                color_system=None,
+                width=120,
+                height=40,
+            )
+            cli.execute_workflow = fake_execute_workflow  # type: ignore[assignment]
+            cli.ObservabilityHub = _CountOnlyHub  # type: ignore[assignment]
+            tmux_adapter_module.TmuxCompactRuntime = FailingStartObserver  # type: ignore[assignment]
+            shutil.which = (  # type: ignore[assignment]
+                lambda value, **kwargs: (
+                    "/usr/bin/tmux"
+                    if value == "tmux"
+                    else original_which(value, **kwargs)
+                )
+            )
+            try:
+                cli.run(
+                    tasks_file=workflow_path,
+                    config_file=config_path,
+                    dry_run=False,
+                    force=False,
+                )
+            finally:
+                shutil.which = original_which  # type: ignore[assignment]
+                tmux_adapter_module.TmuxCompactRuntime = original_runtime_class  # type: ignore[assignment]
+                cli.ObservabilityHub = original_hub  # type: ignore[assignment]
+                cli.execute_workflow = original_execute_workflow  # type: ignore[assignment]
+                cli.Console = original_console_cls
+
+            self.assertIn(
+                "live dashboard unavailable; continuing without live dashboard",
+                stream.getvalue(),
+            )
+
+    @requires_tmux_support
+    def test_hub_without_activity_check_still_reports_the_active_dashboard(
+        self,
+    ) -> None:
+        """A status observer disabled by its first write must not hide the dashboard."""
+        with temporary_project_cwd(self.tmp_path) as tmp_path:
+            config_path = tmp_path / "config.yml"
+            workflow_path = tmp_path / "workflow.task.md"
+            write_basic_config(config_path)
+            write_basic_workflow(workflow_path)
+            config_path.write_text(
+                config_path.read_text(encoding="utf-8")
+                + "\n".join(
+                    [
+                        "",
+                        "settings:",
+                        "  integrations:",
+                        "    status:",
+                        '      implementation: "osc7501"',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+                newline="\n",
+            )
+
+            stream = io.StringIO()
+            original_console_cls = cli.Console
+            original_execute_workflow = cli.execute_workflow
+            original_hub = cli.ObservabilityHub
+            original_which = shutil.which
+            import crewplane.adapters.status.osc7501 as status_adapter_module
+            import crewplane.adapters.ui.tmux as tmux_adapter_module
+
+            original_runtime_class = tmux_adapter_module.TmuxCompactRuntime
+            original_write = status_adapter_module.write_status_sequence
+
+            async def fake_execute_workflow(plan, output, **kwargs):  # type: ignore[no-untyped-def]  # noqa: ARG001 - Required by test double or callback signature.
+                return plan
+
+            class StubObserver(_ConformingObserverStub):
+                def __init__(  # type: ignore[no-untyped-def]
+                    self,
+                    auto_close_session=True,
+                    tmux_executable="tmux",
+                    warning_sink=None,
+                    quiet_after_seconds=120.0,
+                    log_tail_lines=None,
+                ):
+                    pass
+
+            def fail_status_write(console: object, sequence: object) -> None:
+                del console, sequence
+                raise OSError("terminal write failed")
+
+            cli.Console = ConsoleFactory(
+                file=stream,
+                force_terminal=True,
+                color_system=None,
+                width=120,
+                height=40,
+            )
+            cli.execute_workflow = fake_execute_workflow  # type: ignore[assignment]
+            cli.ObservabilityHub = _CountOnlyHub  # type: ignore[assignment]
+            tmux_adapter_module.TmuxCompactRuntime = StubObserver  # type: ignore[assignment]
+            status_adapter_module.write_status_sequence = fail_status_write  # type: ignore[assignment]
+            shutil.which = (  # type: ignore[assignment]
+                lambda value, **kwargs: (
+                    "/usr/bin/tmux"
+                    if value == "tmux"
+                    else original_which(value, **kwargs)
+                )
+            )
+            try:
+                cli.run(
+                    tasks_file=workflow_path,
+                    config_file=config_path,
+                    dry_run=False,
+                    force=False,
+                )
+            finally:
+                shutil.which = original_which  # type: ignore[assignment]
+                status_adapter_module.write_status_sequence = original_write  # type: ignore[assignment]
+                tmux_adapter_module.TmuxCompactRuntime = original_runtime_class  # type: ignore[assignment]
+                cli.ObservabilityHub = original_hub  # type: ignore[assignment]
+                cli.execute_workflow = original_execute_workflow  # type: ignore[assignment]
+                cli.Console = original_console_cls
+
+            self.assertIn(
+                "observability observer disabled after error",
+                stream.getvalue(),
+            )
+            self.assertNotIn("live dashboard unavailable", stream.getvalue())

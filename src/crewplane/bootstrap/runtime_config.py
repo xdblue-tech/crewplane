@@ -31,6 +31,7 @@ class RuntimeConfigSnapshotBuildResult:
     invoker_options: JsonObject = field(repr=False)
     artifact_options: JsonObject = field(repr=False)
     ui_options: JsonObject = field(repr=False)
+    status_options: JsonObject = field(repr=False)
 
 
 def build_runtime_config_snapshot(
@@ -45,6 +46,7 @@ def build_runtime_config_snapshot(
     invoker_spec = settings.integrations.invoker
     artifacts_spec = settings.integrations.artifacts
     ui_spec = settings.integrations.ui
+    status_spec = settings.integrations.status
 
     invoker_identity = resolve_implementation_path(
         "invoker", invoker_spec.implementation
@@ -54,10 +56,15 @@ def build_runtime_config_snapshot(
         artifacts_spec.implementation,
     )
     ui_identity = resolve_implementation_path("ui", ui_spec.implementation)
+    status_identity = resolve_implementation_path(
+        "status",
+        status_spec.implementation,
+    )
 
     invoker_adapter = instantiate_adapter("invoker", invoker_spec.implementation)
     artifacts_adapter = instantiate_adapter("artifacts", artifacts_spec.implementation)
     ui_adapter = instantiate_adapter("ui", ui_spec.implementation)
+    status_adapter = instantiate_adapter("status", status_spec.implementation)
 
     invoker_options = dict(invoker_spec.options)
     if is_builtin_implementation("invoker", invoker_spec.implementation, "mock"):
@@ -83,11 +90,19 @@ def build_runtime_config_snapshot(
         dict(ui_spec.options),
         ui_adapter.canonicalize_options,
     )
+    status_config = _canonicalize_integration_options(
+        "status",
+        status_spec.implementation,
+        status_identity,
+        dict(status_spec.options),
+        status_adapter.canonicalize_options,
+    )
     snapshot = RuntimeConfigSnapshot.build(
         config=config,
         invoker=invoker_config,
         artifacts=artifact_config,
         ui=ui_config,
+        status=status_config,
         options=RuntimeConfigSnapshotOptions(
             no_live=no_live,
             console_is_terminal=console.is_terminal,
@@ -99,6 +114,7 @@ def build_runtime_config_snapshot(
         invoker_options=dict(invoker_config.options),
         artifact_options=dict(artifact_config.options),
         ui_options=dict(ui_config.options),
+        status_options=dict(status_config.options),
     )
 
 

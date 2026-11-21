@@ -8,8 +8,14 @@ from typing import Protocol
 
 from rich.console import Console
 
-from crewplane.architecture.contracts import AgentInvoker, LogLevel
-from crewplane.architecture.ports import ArtifactStorePort
+from crewplane.architecture.contracts import (
+    AgentInvoker,
+    DashboardSnapshot,
+    LogLevel,
+    ObserverCapabilities,
+    RunContext,
+)
+from crewplane.architecture.ports import ArtifactStorePort, StatusObserver
 from crewplane.architecture.ports.runtime import RuntimeComponents
 from crewplane.core.preflight import PreflightExecutionPlan
 from crewplane.core.preflight.secrets import SecretContext
@@ -178,12 +184,12 @@ class ObservabilityHubFactory(Protocol):
 def observer_is_active(
     hub: ObservabilityHubInstance,
     observer: Observer,
-    observer_count: int = 0,
+    non_ui_observer_count: int = 0,
 ) -> bool:
     checker = getattr(hub, "observer_is_active", None)
     if callable(checker):
         return bool(checker(observer))
-    return observer_count > 0 and hub.active_observer_count > 1
+    return hub.active_observer_count > non_ui_observer_count
 
 
 async def wait_for_stop_request(hub: ObservabilityHubInstance) -> None:
@@ -275,17 +281,34 @@ def _resolve_observability_hub(
     return ObservabilityHub
 
 
+def _active_non_ui_observer_count(
+    status_observer: _GuardedStatusObserver | None,
+) -> int:
+    """Count the non-UI observers a hub without per-observer checks delivers to.
+
+    ``active_observer_count`` is the only hub signal on that path, so the
+    fallback subtracts the observers the run path knows about. The persistent
+    logger is required and already started; the status observer counts only
+    while it still receives deliveries.
+    """
+    if status_observer is None or status_observer.delivery_failed:
+        return 1
+    return 2
+
+
 def _is_live_dashboard_available(
     hub: ObservabilityHubInstance,
     components: RuntimeComponents,
+    status_observer: _GuardedStatusObserver | None,
 ) -> bool:
     if not components.observers:
         return False
+    non_ui_observer_count = _active_non_ui_observer_count(status_observer)
     return any(
         observer_is_active(
             hub,
             observer,
-            observer_count=len(components.observers),
+            non_ui_observer_count=non_ui_observer_count,
         )
         for observer in components.observers
     )
@@ -399,6 +422,112 @@ def _handle_shutdown(
     raise shutdown_error
 
 
+def _final_run_result(
+    terminal_error: BaseException | None,
+    shutdown_error: BaseException | None,
+) -> RunResult:
+    """Map the last failure recorded by the run path to the terminal status."""
+    error = shutdown_error if shutdown_error is not None else terminal_error
+    if error is None:
+        return RunResult(status="succeeded")
+    if isinstance(error, (asyncio.CancelledError, WorkflowCancelledByUser)):
+        return RunResult(status="cancelled", cancel_reason=str(error))
+    return RunResult(status="failed")
+
+
+class _GuardedStatusObserver:
+    """Hub-facing lifecycle view of a status observer under the status contract.
+
+    Composition validates the adapter contract once, but the hub keeps polling
+    ``stop_requested`` on every active observer for the whole run and applies
+    the observer's own capabilities when delivery fails. The guard pins that
+    hub-facing contract, so a status observer can neither cancel the run nor
+    become required after composition. It also records when the hub stops
+    delivering to the observer, so the run path never assumes it stayed active.
+    """
+
+    capabilities: ObserverCapabilities
+
+    def __init__(self, observer: StatusObserver) -> None:
+        self._observer = observer
+        self.capabilities = ObserverCapabilities(
+            required=False,
+            synchronous_snapshot_delivery=True,
+            cleanup_after_start_timeout=(
+                observer.capabilities.cleanup_after_start_timeout
+            ),
+        )
+        self._delivery_failed = False
+
+    @property
+    def stop_requested(self) -> bool:
+        return False
+
+    @property
+    def delivery_failed(self) -> bool:
+        """Whether a lifecycle call failed, so status delivery stopped for this run."""
+        return self._delivery_failed
+
+    def start(self, context: RunContext) -> None:
+        self._forward(self._observer.start, context)
+
+    def on_snapshot(
+        self,
+        event: ExecutionEvent | None,
+        snapshot: DashboardSnapshot,
+    ) -> None:
+        self._forward(self._observer.on_snapshot, event, snapshot)
+
+    def stop(self, result: RunResult) -> None:
+        self._observer.stop(result)
+
+    def _forward(self, call: Callable[..., None], *args: object) -> None:
+        """Record the failure the hub uses to disable this observer."""
+        try:
+            call(*args)
+        except Exception:
+            self._delivery_failed = True
+            raise
+
+
+def publish_terminal_status(
+    observer: StatusObserver | None,
+    result: RunResult,
+    warning_sink: Callable[[str], None],
+) -> None:
+    """Publish the terminal status after the final outcome is durable.
+
+    The observer's shutdown already ran inside the hub, before required
+    observers stopped and the manifest was committed. Reporting stays best
+    effort here too: a late write failure warns and never alters the run
+    result or exit code.
+    """
+    if observer is None:
+        return
+    try:
+        observer.publish_terminal_status(result)
+    except Exception as exc:
+        _warn_terminal_status_failure(warning_sink, exc)
+
+
+def _warn_terminal_status_failure(
+    warning_sink: Callable[[str], None],
+    error: Exception,
+) -> None:
+    """Report a failed terminal status without ever failing the run.
+
+    The default sink prints to the same console stream the status writer uses,
+    so a persistently broken terminal makes the warning fail as well. This is
+    the outer boundary of the publication path, mirroring how the hub warns and
+    then disables an observer: reporting cannot replace a successful result or
+    mask an error that is already propagating.
+    """
+    try:
+        warning_sink(f"status reporting failed after run completion: {error}")
+    except Exception:
+        return
+
+
 async def execute_workflow_with_observability(
     components: RuntimeComponents,
     workflow_topology: WorkflowTopology,
@@ -416,16 +545,29 @@ async def execute_workflow_with_observability(
 ) -> None:
     observability_hub_factory = _resolve_observability_hub(observability_hub_cls)
     terminal_error: BaseException | None = None
+    shutdown_error: BaseException | None = None
+    status_observer = (
+        None
+        if components.status_observer is None
+        else _GuardedStatusObserver(components.status_observer)
+    )
+    hub_observers: list[Observer] = [persistent_logger, *components.observers]
+    if status_observer is not None:
+        hub_observers.append(status_observer)
     try:
         with observability_hub_factory(
             workflow_topology=workflow_topology,
             run_id=output.run_id,
-            observers=[persistent_logger, *components.observers],
+            observers=hub_observers,
             refresh_per_second=0,
             warning_sink=warning_recorder.sink,
         ) as hub:
             warning_recorder.flush_queued()
-            has_live_dashboard = _is_live_dashboard_available(hub, components)
+            has_live_dashboard = _is_live_dashboard_available(
+                hub,
+                components,
+                status_observer,
+            )
             if components.observers and not has_live_dashboard:
                 warning_recorder.sink(
                     "live dashboard unavailable; continuing without live dashboard."
@@ -455,9 +597,16 @@ async def execute_workflow_with_observability(
                     terminalization,
                     hub,
                 )
-    except BaseException as shutdown_error:
+        terminalization.acknowledge_observer_shutdown()
+    except BaseException as exc:
+        shutdown_error = exc
+    finally:
+        publish_terminal_status(
+            components.status_observer,
+            _final_run_result(terminal_error, shutdown_error),
+            warning_recorder.sink,
+        )
+    if shutdown_error is not None:
         _handle_shutdown(shutdown_error, terminal_error)
-
-    terminalization.acknowledge_observer_shutdown()
     if terminal_error is not None:
         raise terminal_error
