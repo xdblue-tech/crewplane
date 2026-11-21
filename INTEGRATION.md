@@ -5,7 +5,8 @@ Analysis of wiring crewplane into [herdr-core](https://github.com/herdrdev/herdr
 (the desktop window layer). Written against the `xdblue-tech/crewplane` fork on
 `master`; herdr-core/herdr-app sources were not available locally — findings rest
 on their published docs, the `hc` skill manual, generated mod typings, and
-consumer mods in local checkouts.
+consumer mods in local checkouts. Operational wiring instructions for the
+tier-2 status integration live in [HERDR.md](./HERDR.md).
 
 ## First usable workflow (no code changes)
 
