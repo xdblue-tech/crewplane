@@ -39,6 +39,7 @@ def build_components_for_run(
         ui_options=snapshot_result.ui_options,
         status_options=snapshot_result.status_options,
         artifact_store=artifact_store,
+        workflow_path=context.source.root_workflow_path,
     )
 
 

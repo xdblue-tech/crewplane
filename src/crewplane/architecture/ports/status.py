@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Protocol
 
 from rich.console import Console
@@ -32,5 +33,11 @@ class StatusReporterPort(IntegrationOptionsCanonicalizerPort, Protocol):
         run_id: str,
         console: Console,
         options: JsonObject | None = None,
+        workflow_path: Path | None = None,
     ) -> StatusObserver:
-        """Build the observer that reports run status to the hosting terminal."""
+        """Build the observer that reports run status to the hosting terminal.
+
+        ``workflow_path`` is the resolved workflow file the run was started from;
+        adapters that report workflow identity derive it from this path rather
+        than from the workflow's human title or a filesystem scan.
+        """

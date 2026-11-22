@@ -113,6 +113,7 @@ async def run_workflow(
     execute_workflow_impl: Callable[..., Any] | None = None,
     observability_hub_cls: type[ObservabilityHub] | None = None,
     no_live: bool = True,
+    workflow_path: Path | None = None,
 ) -> None:
     run_kwargs = {}
     if execute_workflow_impl is not None:
@@ -125,7 +126,11 @@ async def run_workflow(
             workflow,
             workflow_content="workflow source",
             composed_workflow=runner_workflow_payload(workflow),
-            root_workflow_path=Path.cwd() / "workflow.task.md",
+            root_workflow_path=(
+                workflow_path
+                if workflow_path is not None
+                else Path.cwd() / "workflow.task.md"
+            ),
         ),
         force=force,
         no_live=no_live,

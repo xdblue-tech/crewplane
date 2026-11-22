@@ -74,10 +74,18 @@ def _status_pairs(console_text: str) -> list[dict[str, str]]:
     ]
 
 
+def _root_pairs(console_text: str) -> list[dict[str, str]]:
+    return [pairs for pairs in _status_pairs(console_text) if "id" not in pairs]
+
+
+def _companion_pairs(console_text: str) -> list[dict[str, str]]:
+    return [pairs for pairs in _status_pairs(console_text) if "id" in pairs]
+
+
 def _terminal_pairs(console_text: str) -> list[dict[str, str]]:
     return [
         pairs
-        for pairs in _status_pairs(console_text)
+        for pairs in _root_pairs(console_text)
         if pairs["state"] in _TERMINAL_STATES
     ]
 
@@ -148,7 +156,7 @@ def test_successful_run_reports_working_then_done(
         )
     )
 
-    pairs = _status_pairs(stream.getvalue())
+    pairs = _root_pairs(stream.getvalue())
     assert pairs[0]["state"] == "working"
     assert pairs[0]["app"] == "crewplane"
     assert _decoded_message(pairs[0]) == "Task"
@@ -463,7 +471,7 @@ def test_repeated_passes_report_status_per_pass(
     assert result.exit_code == 0, (result.output, result.exception)
     passes: list[list[dict[str, str]]] = []
     current_pass: list[dict[str, str]] = []
-    for pairs in _status_pairs(stream.getvalue()):
+    for pairs in _root_pairs(stream.getvalue()):
         current_pass.append(pairs)
         if pairs["state"] in _TERMINAL_STATES:
             passes.append(current_pass)
@@ -690,7 +698,7 @@ def test_hold_preserves_the_exit_code(
     assert held.exit_code == unheld.exit_code, (held.output, held.exception)
     assert unheld_reads == []
     assert HOLD_PROMPT not in unheld_stream.getvalue()
-    assert _status_pairs(unheld_stream.getvalue())[-1] == {
+    assert _root_pairs(unheld_stream.getvalue())[-1] == {
         "state": expected_state,
         "app": "crewplane",
     }
@@ -752,7 +760,7 @@ def test_omitted_flag_keeps_a_disabled_config_default(
     assert result.exit_code == 0, (result.output, result.exception)
     assert reads == []
     assert HOLD_PROMPT not in stream.getvalue()
-    assert _status_pairs(stream.getvalue())[-1] == {
+    assert _root_pairs(stream.getvalue())[-1] == {
         "state": "done",
         "app": "crewplane",
     }

@@ -42,6 +42,7 @@ def build_runtime_components(
     ui_options: JsonObject | None = None,
     status_options: JsonObject | None = None,
     artifact_store: ArtifactStorePort | None = None,
+    workflow_path: Path | None = None,
 ) -> RuntimeComponents:
     """Assemble an invoker, artifact store, and optional live observer plan.
 
@@ -62,9 +63,11 @@ def build_runtime_components(
     Otherwise, use ``ui_options`` or a copy of configured options. Create the
     status reporter regardless of the live UI gate, because status reporting
     only depends on the status integration and ``status_options``; keep its
-    observer separate from UI observers. Return observers without starting
-    them. Errors propagate without rolling back an already allocated store.
-    """
+    observer separate from UI observers. ``workflow_path`` is the resolved
+    workflow file, passed through for adapters that report workflow identity.
+    Return observers without starting them. Errors propagate without rolling
+    back an already allocated store.
+    """""
 
     settings = config.settings
 
@@ -132,6 +135,7 @@ def build_runtime_components(
             resolved_artifact_store,
             console,
             status_options,
+            workflow_path,
         ),
     )
 
@@ -143,12 +147,14 @@ def _create_status_reporter(
     artifact_store: ArtifactStorePort,
     console: Console,
     options: JsonObject | None,
+    workflow_path: Path | None,
 ) -> StatusObserver:
     status_observer = status_adapter.create_reporter(
         config=config,
         run_id=artifact_store.run_id,
         console=console,
         options=options if options is not None else dict(status_spec.options),
+        workflow_path=workflow_path,
     )
     _validate_status_observer_contract(status_observer, status_spec.implementation)
     return status_observer

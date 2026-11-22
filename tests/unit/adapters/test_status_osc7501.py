@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import io
 from collections.abc import Iterable
+from pathlib import Path
 
 import pytest
 from rich.console import Console
@@ -10,6 +11,8 @@ from rich.console import Console
 from crewplane.adapters.status import (
     Osc7501StatusObserver,
     Osc7501StatusReporter,
+    companion_record_id,
+    companion_title,
     format_status_sequence,
     write_clear_status,
     write_status_sequence,
@@ -80,9 +83,19 @@ class _RecordingWriter:
         self.sequences.append(sequence)
 
 
-def _append_sequence(writer: _RecordingWriter) -> Osc7501StatusObserver:
+def _append_sequence(
+    writer: _RecordingWriter,
+    *,
+    record_id: str | None = None,
+    title: str | None = None,
+) -> Osc7501StatusObserver:
     console = Console(file=io.StringIO(), force_terminal=True, color_system=None)
-    return Osc7501StatusObserver(console, writer=writer)
+    return Osc7501StatusObserver(
+        console,
+        writer=writer,
+        record_id=record_id,
+        title=title,
+    )
 
 
 def test_format_status_sequence_encodes_message_as_base64() -> None:
@@ -97,6 +110,53 @@ def test_format_status_sequence_omits_absent_optional_keys() -> None:
     assert (
         format_status_sequence("error") == b"\x1b]7501;state=error:app=crewplane\x1b\\"
     )
+
+
+def test_format_status_sequence_writes_a_record_id_and_title() -> None:
+    sequence = format_status_sequence(
+        "working",
+        msg="node A",
+        record_id="crewplane/20261122-134628",
+        title="review",
+    )
+
+    assert sequence == (
+        b"\x1b]7501;state=working:id=crewplane/20261122-134628:app=crewplane"
+        b":title=cmV2aWV3:msg=bm9kZSBB\x1b\\"
+    )
+
+
+def test_companion_record_id_keeps_the_exact_run_id() -> None:
+    assert (
+        companion_record_id("20261122-134628")
+        == "crewplane/20261122-134628"
+    )
+    assert companion_record_id("a" * 32) == f"crewplane/{'a' * 32}"
+
+
+@pytest.mark.parametrize(
+    "run_id",
+    [
+        "run/child",
+        "run 1",
+        "a" * 33,
+        "",
+    ],
+)
+def test_companion_record_id_omits_a_run_id_that_cannot_be_one_segment(
+    run_id: str,
+) -> None:
+    assert companion_record_id(run_id) is None
+
+
+def test_companion_title_is_the_workflow_basename_without_the_suffix() -> None:
+    assert (
+        companion_title(Path("/repo/.crewplane/workflows/review.task.md"))
+        == "review"
+    )
+    assert companion_title(Path("/repo/flows/review.md")) == "review.md"
+    assert companion_title(Path("/repo/flows/.task.md")) is None
+    assert companion_title(None) is None
 
 
 def test_format_status_sequence_encodes_non_ascii_messages() -> None:
@@ -169,6 +229,111 @@ def test_snapshot_publishes_workflow_name_then_running_node() -> None:
     assert writer.sequences == [
         format_status_sequence("working", msg=WORKFLOW_NAME),
         format_status_sequence("working", msg="second"),
+    ]
+
+
+def test_companion_record_follows_the_first_running_node() -> None:
+    writer = _RecordingWriter()
+    observer = _append_sequence(
+        writer,
+        record_id="crewplane/20261122-134628",
+        title="status-flow",
+    )
+    feed = _SnapshotFeed(_topology())
+    observer.start(RunContext(workflow_topology=_topology(), run_id=RUN_ID, refresh_per_second=4))
+
+    events = [
+        node_event(EventType.NODE_STARTED, WORKFLOW_NAME, RUN_ID, "second"),
+        node_event(EventType.NODE_STARTED, WORKFLOW_NAME, RUN_ID, "first"),
+    ]
+    observer.on_snapshot(None, feed.snapshot(events))
+
+    assert writer.sequences == [
+        format_status_sequence("working", msg="first"),
+        format_status_sequence(
+            "working",
+            msg="first",
+            record_id="crewplane/20261122-134628",
+            title="status-flow",
+        ),
+    ]
+
+
+def test_companion_omits_the_node_when_no_node_is_running() -> None:
+    writer = _RecordingWriter()
+    observer = _append_sequence(
+        writer,
+        record_id="crewplane/20261122-134628",
+        title="status-flow",
+    )
+
+    observer.on_snapshot(None, _SnapshotFeed(_topology()).snapshot())
+
+    assert writer.sequences == [
+        format_status_sequence("working", msg=WORKFLOW_NAME),
+        format_status_sequence(
+            "working",
+            record_id="crewplane/20261122-134628",
+            title="status-flow",
+        ),
+    ]
+
+
+def test_terminal_state_keeps_the_companion_metadata_without_a_node() -> None:
+    writer = _RecordingWriter()
+    observer = _append_sequence(
+        writer,
+        record_id="crewplane/20261122-134628",
+        title="status-flow",
+    )
+
+    observer.publish_terminal_status(RunResult(status="succeeded"))
+
+    assert writer.sequences == [
+        format_status_sequence("done"),
+        format_status_sequence(
+            "done",
+            record_id="crewplane/20261122-134628",
+            title="status-flow",
+        ),
+    ]
+
+
+def test_companion_resends_its_fields_when_the_node_changes() -> None:
+    writer = _RecordingWriter()
+    observer = _append_sequence(
+        writer,
+        record_id="crewplane/20261122-134628",
+        title="status-flow",
+    )
+    feed = _SnapshotFeed(_topology(("first",)))
+    observer.start(
+        RunContext(
+            workflow_topology=_topology(("first",)),
+            run_id=RUN_ID,
+            refresh_per_second=4,
+        )
+    )
+    start = node_event(EventType.NODE_STARTED, WORKFLOW_NAME, RUN_ID, "first")
+    finish = node_event(EventType.NODE_FINISHED, WORKFLOW_NAME, RUN_ID, "first")
+
+    observer.on_snapshot(None, feed.snapshot([start]))
+    observer.on_snapshot(finish, feed.snapshot([finish]))
+
+    assert writer.sequences == [
+        format_status_sequence("working", msg="first"),
+        format_status_sequence(
+            "working",
+            msg="first",
+            record_id="crewplane/20261122-134628",
+            title="status-flow",
+        ),
+        format_status_sequence("working", msg=WORKFLOW_NAME),
+        format_status_sequence(
+            "working",
+            record_id="crewplane/20261122-134628",
+            title="status-flow",
+        ),
     ]
 
 
@@ -276,12 +441,52 @@ def test_create_reporter_returns_synchronous_best_effort_observer() -> None:
     assert observer.stop_requested is False
 
 
+def test_create_reporter_uses_the_run_and_workflow_identity() -> None:
+    stream = io.StringIO()
+    observer = Osc7501StatusReporter().create_reporter(
+        config=Config(version=SCHEMA_VERSION, agents={}),
+        run_id="20261122-134628",
+        console=Console(file=stream, force_terminal=True, color_system=None),
+        workflow_path=Path("/repo/flows/review.task.md"),
+    )
+
+    observer.on_snapshot(None, _SnapshotFeed(_topology()).snapshot())
+
+    assert stream.getvalue() == "".join(
+        sequence.decode("ascii")
+        for sequence in (
+            format_status_sequence("working", msg=WORKFLOW_NAME),
+            format_status_sequence(
+                "working",
+                record_id="crewplane/20261122-134628",
+                title="review",
+            ),
+        )
+    )
+
+
+def test_create_reporter_without_a_workflow_path_has_no_companion() -> None:
+    stream = io.StringIO()
+    observer = Osc7501StatusReporter().create_reporter(
+        config=Config(version=SCHEMA_VERSION, agents={}),
+        run_id="20261122-134628",
+        console=Console(file=stream, force_terminal=True, color_system=None),
+    )
+
+    observer.on_snapshot(None, _SnapshotFeed(_topology()).snapshot())
+
+    assert stream.getvalue() == format_status_sequence(
+        "working", msg=WORKFLOW_NAME
+    ).decode("ascii")
+
+
 @pytest.mark.parametrize(
     ("field", "value", "error"),
     [
         ("config", {}, TypeError),
         ("run_id", "", ValueError),
         ("console", object(), TypeError),
+        ("workflow_path", "flows/review.task.md", TypeError),
     ],
 )
 def test_create_reporter_rejects_invalid_boundary_values(
