@@ -284,6 +284,7 @@ class Settings(BaseModel):
     token_budget: TokenBudgetSettings = Field(default_factory=TokenBudgetSettings)
     file_access: FileAccessSettings = Field(default_factory=FileAccessSettings)
     integrations: IntegrationsConfig = Field(default_factory=IntegrationsConfig)
+    hold_after_run: bool = False
 
     @field_validator("sequential_consensus_on_exhaustion", mode="before")
     @classmethod

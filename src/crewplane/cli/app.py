@@ -33,6 +33,7 @@ from .dry_run import (
 )
 from .onboarding import ONBOARDING_COMMAND_HELP, run_onboarding_command
 from .project_init import initialize_project_templates
+from .run.hold import hold_after_execution_failure, hold_after_run, hold_requested
 from .run.observability import ObservabilityHubInstance
 from .run.resume import print_dry_run_resume_advisory
 from .runs import runs_app
@@ -51,6 +52,10 @@ from .workflow_context import (
 app = typer.Typer(name="crewplane", help="Multi-agent workflow runner")
 app.add_typer(cleanup_app, name="cleanup")
 app.add_typer(runs_app, name="runs")
+
+# Marks a workflow failure whose diagnostic already reached the console, so the
+# cleanup report that follows does not print it a second time.
+EXECUTION_FAILURE_DIAGNOSTIC_PRINTED = "execution failure diagnostic printed"
 
 
 def _configure_output_encoding() -> None:
@@ -122,8 +127,8 @@ async def _execute_workflow(
     force: bool,
     no_live: bool,
     console: Console,
-) -> None:
-    await workflow_runner.execute_workflow_run(
+) -> bool:
+    return await workflow_runner.execute_workflow_run(
         config=config,
         source=source,
         project_root=project_root,
@@ -141,10 +146,12 @@ async def _execute_workflow_passes(
     force: bool,
     no_live: bool,
     console: Console,
-) -> None:
+) -> bool:
+    """Execute every pass, reporting whether any pass finalized a run."""
     paths = context.paths
     repeat_count = context.source.workflow.repeat_force_run_count
     effective_force = force or repeat_count is not None
+    finalized = False
     for pass_index in range(repeat_count or 1):
         if repeat_count is not None:
             console.print(f"Run {pass_index + 1} of {repeat_count} (fresh)")
@@ -155,7 +162,7 @@ async def _execute_workflow_passes(
                 raise_context_loading_failure(
                     exc, console, paths=paths, write_diagnostics=True
                 )
-        await _execute_workflow(
+        pass_finalized = await _execute_workflow(
             context.config,
             context.source,
             project_root=paths.project_root,
@@ -164,6 +171,8 @@ async def _execute_workflow_passes(
             no_live=no_live,
             console=console,
         )
+        finalized = finalized or pass_finalized
+    return finalized
 
 
 def _create_observability_hub(
@@ -295,6 +304,16 @@ def run(
             help="Disable live topology dashboard output.",
         ),
     ] = False,
+    hold: Annotated[
+        bool | None,
+        typer.Option(
+            "--hold/--no-hold",
+            help=(
+                "Hold the terminal open after the run finishes "
+                "(for OSC 7501 hosts such as herdr)."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Execute the workflow DAG."""
     console = Console()
@@ -332,15 +351,36 @@ def run(
             exc, console, paths=paths, write_diagnostics=not dry_run
         )
 
+    hold_enabled = hold_requested(hold, context.config)
     try:
-        asyncio.run(
-            _execute_workflow_passes(
-                context,
-                force=force,
-                no_live=no_live,
-                console=console,
+        try:
+            run_finalized = asyncio.run(
+                _execute_workflow_passes(
+                    context,
+                    force=force,
+                    no_live=no_live,
+                    console=console,
+                )
             )
-        )
+        except WorkflowExecutionError as exc:
+            # An execution failure that published the error status and dropped
+            # the run lock finalizes like a success. Unconfirmed provider
+            # cleanup leaves the run unfinalized, so the outer handler reports
+            # that failure instead.
+            if not hold_after_execution_failure(exc):
+                raise
+            # Print before the hold: a host that closes the pane on exit would
+            # otherwise hide the diagnostic behind the wait.
+            exc.add_note(EXECUTION_FAILURE_DIAGNOSTIC_PRINTED)
+            console.print(Text.assemble(("✗", "red"), f" {exc}"))
+            if hold_enabled:
+                hold_after_run(console)
+            raise typer.Exit(code=1) from None
+        else:
+            # A duplicate-context skip returns without publishing a status, so
+            # only a run that actually finalized holds the terminal open.
+            if hold_enabled and run_finalized:
+                hold_after_run(console)
     except KeyboardInterrupt as exc:
         cleanup_error = unconfirmed_process_cleanup(exc)
         if cleanup_error is None:
@@ -349,9 +389,6 @@ def run(
     except workflow_runner.WorkflowCancelledByUser as exc:
         console.print(f"[yellow]{exc}[/]")
         raise typer.Exit(code=130) from None
-    except WorkflowExecutionError as exc:
-        console.print(Text.assemble(("✗", "red"), f" {exc}"))
-        raise typer.Exit(code=1) from None
     except ResumeLockError as exc:
         console.print(f"[red]✗[/] Run lock unavailable: {exc}")
         console.print(
@@ -367,6 +404,15 @@ def run(
         cleanup_error = unconfirmed_process_cleanup(exc)
         if cleanup_error is None:
             raise
+        if any(
+            note == EXECUTION_FAILURE_DIAGNOSTIC_PRINTED
+            for note in getattr(exc, "__notes__", ())
+        ):
+            # The workflow diagnostic is already on screen; the cleanup evidence
+            # is what the run has not reported yet.
+            raise_context_loading_failure(
+                cleanup_error, console, include_original=False
+            )
         raise_context_loading_failure(exc, console)
 
 

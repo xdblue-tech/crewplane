@@ -372,8 +372,13 @@ async def execute_workflow_run(
     which_fn: Callable[[str], str | None] | None = None,
     project_root: Path | None = None,
     state_dir: Path | None = None,
-) -> None:
-    """Compile preflight, execute the plan, and finalize the run manifest."""
+) -> bool:
+    """Compile preflight, execute the plan, and finalize the run manifest.
+
+    The result says whether this invocation executed and finalized a run. A
+    duplicate-context skip returns ``False``: it keeps the earlier run's outcome
+    and publishes no status of its own, so nothing may hold that terminal.
+    """
     context = build_workflow_run_context(
         config, source, console, project_root, state_dir
     )
@@ -402,12 +407,13 @@ async def execute_workflow_run(
     )
     terminalization: TerminalizationCoordinator | None = None
     running_manifest_written = False
+    finalized = False
     try:
         if cancellation is not None:
             raise cancellation
         resume_plan = await _prepare_run_resume(context, preview, force)
         if resume_plan is None:
-            return
+            return False
 
         workflow_topology = workflow_topology_from_preview(preview)
         output = allocate_run_output(context, snapshot_result, warning_recorder)
@@ -456,6 +462,7 @@ async def execute_workflow_run(
             terminalization=terminalization,
             resumed_node_ids=resume_plan.resumed_node_ids,
         )
+        finalized = True
     finally:
         terminal_complete = not running_manifest_written or (
             terminalization is not None and terminalization.committed
@@ -465,3 +472,4 @@ async def execute_workflow_run(
             cleanup_unconfirmed=unconfirmed_process_cleanup(sys.exception())
             is not None,
         )
+    return finalized

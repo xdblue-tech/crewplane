@@ -224,6 +224,7 @@ Pricing values are per million tokens.
 | `settings.token_budget` | Global token budget warning/failure thresholds. |
 | `settings.workspace` | Workspace isolation settings. |
 | `settings.integrations` | Adapter implementation and option settings. |
+| `settings.hold_after_run` | Keep the terminal open after a finished run so a status host keeps showing the outcome. Defaults to `false`; `crewplane run --hold` and `--no-hold` override it per run. See the [status integration](integrations.md#holding-the-terminal-open). |
 
 Iteration preflight sums literal item counts, or dynamic `max_items`, multiplied
 by the number of nodes in each compiled child. The total must fit

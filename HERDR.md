@@ -75,11 +75,14 @@ toggle the mod to "All spaces".
   failure, `idle` on cancellation. It is published only after the run outcome
   is final (required observers stopped, manifest published), so a late failure
   reports `error` rather than a premature `done`.
-- Visibility is bounded by herdr's lifecycle rules: status facts are reset when
-  the program exits and the shell returns to the foreground. A crewplane run
-  appears as "Working" while it runs, but does not linger as a "Done" entry the
-  way long-lived agents (Claude Code, Codex) do. The authoritative post-run
-  record is the exit code plus
+- Visibility is bounded by herdr's lifecycle rules: a normal program exit
+  closes the pane and removes its entry. A crewplane run appears as "Working"
+  while it runs, but does not linger as a "Done" entry the way long-lived agents
+  (Claude Code, Codex) do, unless the run is
+  [held open](#holding-the-run-open). Status seen only through OSC 7501 can
+  still remain latched on the shell that replaces the program (herdr-core issue
+  #57), which is what the hold's `state=clear` prevents. The authoritative
+  post-run record is the exit code plus
   `.crewplane/execution-results/<run-key>/manifests/run.json`.
 
 Crewplane never reports protocol `blocked` (its node-blocked event is an
@@ -87,6 +90,57 @@ internal dependency wait), no `progress` percentage, and no `msg` on `error`
 (base64 is an encoding, not redaction; provider error text may be sensitive).
 Failures before the reporter exists (config/context loading errors, resume-lock
 contention) report no status — use the process exit code.
+
+## Holding the run open
+
+herdr removes the entry when the program exits, so a finished run normally
+disappears with its pane. Ask `crewplane run` to hold the terminal instead:
+
+```sh
+crewplane run --no-live --hold -t .crewplane/workflows/my.task.md
+```
+
+Set `settings.hold_after_run: true` in `.crewplane/config.yml` to make holding
+the project default. The per-run flag wins: `--no-hold` disables a default-on
+project and `--hold` enables a default-off one.
+
+While held, the terminal keeps the run's real outcome — `done` or `error`, never
+the protocol `blocked` state, which is reserved for "cannot proceed until the
+user acts". Anything pressed dismisses the hold, and Ctrl+C counts as a
+dismissal rather than an interrupt: crewplane writes `state=clear`, then exits
+with the run's normal exit code, so a successful run still exits 0 and a failed
+run still exits 1.
+
+Only a run that finalized is held: success, or an execution failure that
+reports `error`. Finalizing is what the hold needs, not a particular published
+state, so a run whose status integration is `none` holds too. A duplicate-context
+skip publishes no status of its own, so it never holds. Lock contention,
+preflight failures, and user cancellation never hold: their diagnostics print
+after a hold would begin, and cancellation means someone is already at the
+terminal. A workflow failure prints its diagnostic before the hold starts
+waiting. A node or scheduling failure reads `✗ Workflow '<name>' failed:` with
+each failed and blocked node; a postcondition failure instead reports
+`Workflow postconditions failed:` with the first cleanup or descriptor error.
+
+The clear on dismissal is deliberate. herdr-core can otherwise latch the run's
+`done` state onto the recovery shell that replaces the program (herdr-core issue
+#57). `state=clear` is written even when the configured status integration is
+`none`, because a hold always releases the terminal it kept. The write is
+best-effort: a terminal that rejects it warns, and the run keeps its own outcome
+and exit code. herdr also shows a `done` entry as `idle` once it has been
+viewed, so a held pane that has already been read no longer claims fresh
+attention.
+
+Holding needs an interactive terminal and is off by default: crewplane holds
+only when the console and, on POSIX, stdin are both terminals. If stdin is
+unavailable or reading it fails while stdout is a terminal, crewplane writes
+`state=clear` and exits without waiting, so nothing is left latched and the run
+keeps its exit code. Non-terminal output never blocks and stays byte-identical,
+so piped runs are safe; a CI job or script that allocates a tty can block, so
+keep the flag and the config off in automation.
+Under `hc run` the terminal is real, so a held run keeps its terminal alive
+until someone presses a key: leave holding off for automated herdr terminals,
+and never rely on `hc wait` returning while a hold is pending.
 
 ## Verifying
 
@@ -129,11 +183,18 @@ about workflow nodes — no per-node `msg` labels — and it runs the PATH
 install, so it only reports lifecycle states. Prefer the native integration
 documented here once your crewplane build includes it.
 
+For builds with the native integration, `crewplane run --hold` supersedes that
+wrapper's remaining benefit of keeping the finished run on screen. Removing the
+wrapper's entry from `programs.json` is a step on your machine, not part of this
+repository.
+
 ## Source references
 
 - Emission: `src/crewplane/adapters/status/osc7501.py` (wire format, tty
-  gating, dedupe, write-failure disable)
+  gating, dedupe, write-failure disable, `state=clear` on hold dismissal)
 - Run-path publication: `src/crewplane/cli/run/observability.py`
   (`publish_terminal_status`, after manifest finalization)
+- Hold after the run: `src/crewplane/cli/run/hold.py`, wired in
+  `src/crewplane/cli/app.py`
 - Config wiring and default: `src/crewplane/core/config.py`,
   `src/crewplane/bootstrap/container.py`

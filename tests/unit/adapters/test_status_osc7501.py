@@ -11,6 +11,7 @@ from crewplane.adapters.status import (
     Osc7501StatusObserver,
     Osc7501StatusReporter,
     format_status_sequence,
+    write_clear_status,
     write_status_sequence,
 )
 from crewplane.architecture.contracts import RunResult
@@ -233,6 +234,24 @@ def test_write_status_sequence_writes_exact_bytes_without_newline() -> None:
     assert stream.getvalue() == sequence.decode("ascii")
     assert stream.getvalue().encode("ascii") == sequence
     assert not stream.getvalue().endswith("\n")
+
+
+def test_write_clear_status_writes_exactly_the_clear_state() -> None:
+    stream = io.StringIO()
+    console = Console(file=stream, force_terminal=True, color_system=None)
+
+    write_clear_status(console)
+
+    assert stream.getvalue() == "\x1b]7501;state=clear\x1b\\"
+
+
+def test_write_clear_status_skips_non_terminal_console() -> None:
+    stream = io.StringIO()
+    console = Console(file=stream, force_terminal=False, color_system=None)
+
+    write_clear_status(console)
+
+    assert stream.getvalue() == ""
 
 
 def test_adapter_rejects_options() -> None:

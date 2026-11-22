@@ -42,6 +42,7 @@ _TERMINAL_STATES: dict[str, StatusState] = {
     "failed": "error",
     "cancelled": "idle",
 }
+_CLEAR_SEQUENCE = _OSC_INTRODUCER + b"state=clear" + _STRING_TERMINATOR
 
 
 def format_status_sequence(
@@ -70,6 +71,16 @@ def write_status_sequence(console: Console, sequence: bytes) -> None:
     stream = console.file
     stream.write(sequence.decode("ascii"))
     stream.flush()
+
+
+def write_clear_status(console: Console) -> None:
+    """Release the state a host latched onto the terminal after a run exits.
+
+    ``clear`` carries no ``app`` or ``msg``: it reports that the terminal no
+    longer belongs to a tracked program rather than a new program state.
+    """
+
+    write_status_sequence(console, _CLEAR_SEQUENCE)
 
 
 def _encode_message(msg: str) -> str:

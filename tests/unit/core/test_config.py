@@ -348,6 +348,13 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(ValidationError, "Extra inputs are not permitted"):
             Settings.model_validate({"default_workspace": ".crewplane/workspaces"})
 
+    def test_settings_accepts_hold_after_run(self) -> None:
+        self.assertTrue(Settings(hold_after_run=True).hold_after_run)
+
+    def test_settings_rejects_non_boolean_hold_after_run(self) -> None:
+        with self.assertRaisesRegex(ValidationError, "hold_after_run"):
+            Settings(hold_after_run="sometimes")
+
     def test_load_config_rejects_unknown_settings_keys(self) -> None:
         tmp_dir = mkdtemp(dir=self.tmp_path)
         path = Path(tmp_dir) / "config.yml"
@@ -498,6 +505,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(settings.integrations.artifacts.implementation, "filesystem")
         self.assertEqual(settings.sequential_consensus_on_exhaustion, "continue")
         self.assertEqual(settings.token_budget.warn_threshold_chars, 50000)
+        self.assertFalse(settings.hold_after_run)
         self.assertIsNone(settings.token_budget.fail_threshold_chars)
         self.assertEqual(
             settings.integrations.ui.options.get("auto_close_session"),

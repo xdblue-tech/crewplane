@@ -5,6 +5,9 @@ import base64
 import io
 import json
 import re
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -13,10 +16,15 @@ from rich.console import Console
 from typer.testing import CliRunner
 
 import crewplane.adapters.status.osc7501 as status_adapter
+import crewplane.artifacts.locks as resume_locks
 import crewplane.cli.app as cli
+import crewplane.cli.run.hold as hold_module
+import crewplane.cli.run.terminalization as terminalization
 from crewplane.architecture.contracts import RunContext
+from crewplane.artifacts.locks import LOCK_OWNER_FILENAME, acquire_same_context_lock
 from crewplane.artifacts.manager import OutputManager
 from crewplane.cli.run import execution
+from crewplane.cli.run.hold import HOLD_PROMPT
 from crewplane.cli.run.observability import (
     WorkflowCancelledByUser,
     WorkflowWarningRecorder,
@@ -24,13 +32,18 @@ from crewplane.cli.run.observability import (
 )
 from crewplane.core.config import Config, IntegrationSpec
 from crewplane.observability import ObservabilityHub, RunResult
+from crewplane.runtime.agent.process.drain import (
+    ProcessDrainError,
+    ProcessDrainEvidence,
+)
 from crewplane.runtime.execution import WorkflowExecutionError
+from tests.helpers.resume_locks import FakeProcessInspector
 from tests.integration.cli.cli_workflow_helpers import (
     ConsoleFactory,
     write_basic_config,
     write_basic_workflow,
 )
-from tests.integration.cli.repeat_force_run_support import create_project
+from tests.integration.cli.repeat_force_run_support import RepeatProject, create_project
 from tests.integration.cli.terminal_recovery_support import RequiredStopFailureHub
 from tests.integration.cli.workflow_runner_support import (
     mock_runner_config,
@@ -525,3 +538,437 @@ def test_invalid_status_adapter_fails_preflight_commands(
     assert "Unknown status implementation 'missing'" in " ".join(
         stream.getvalue().split()
     )
+
+
+@dataclass
+class HoldDismissal:
+    """Key reader that checks the run's state at the moment the hold waits."""
+
+    root: Path
+    stream: io.StringIO
+    expected_state: str
+    interrupted: bool = False
+    calls: list[str] = field(default_factory=list)
+
+    def __call__(self) -> str:
+        published = [
+            pairs["state"] for pairs in _terminal_pairs(self.stream.getvalue())
+        ]
+        assert published and published[-1] == self.expected_state, (
+            self.stream.getvalue()
+        )
+        assert _lock_owners(self.root) == [], (
+            "the run lock is held while the hold waits"
+        )
+        self.calls.append(self.expected_state)
+        if self.interrupted:
+            raise KeyboardInterrupt
+        return "a"
+
+
+def _lock_owners(root: Path) -> list[Path]:
+    """Same-context lock owner files, which the release path removes."""
+    return sorted((root / ".crewplane" / "locks").glob(f"*/{LOCK_OWNER_FILENAME}"))
+
+
+def _patch_hold_input(
+    monkeypatch: pytest.MonkeyPatch, read_key: Callable[[], str]
+) -> None:
+    """Install a key reader for a process whose stdout and stdin are terminals."""
+    monkeypatch.setattr(hold_module, "read_terminal_key", read_key)
+    monkeypatch.setattr(hold_module, "terminal_key_available", lambda: True)
+
+
+def _record_hold_reads(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    reads: list[str] = []
+
+    def read_key() -> str:
+        reads.append("read")
+        return "a"
+
+    _patch_hold_input(monkeypatch, read_key)
+    return reads
+
+
+def _hold_project(
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    hold_after_run: bool,
+    failing: bool = False,
+    status_implementation: str = "osc7501",
+) -> tuple[RepeatProject, io.StringIO]:
+    """Write one single-pass project and capture its console output."""
+    root.mkdir(exist_ok=True)
+    project = create_project(root, None, node_count=1)
+    project.config["settings"]["hold_after_run"] = hold_after_run
+    project.config["settings"]["integrations"]["status"] = {
+        "implementation": status_implementation,
+        "options": {},
+    }
+    if failing:
+        invoker_options = project.config["settings"]["integrations"]["invoker"][
+            "options"
+        ]
+        invoker_options["fail_when"] = [{"node_id": "node0"}]
+    project.write()
+    stream = io.StringIO()
+    monkeypatch.setattr(
+        cli,
+        "Console",
+        ConsoleFactory(file=stream, force_terminal=True, color_system=None, width=120),
+    )
+    monkeypatch.chdir(root)
+    return project, stream
+
+
+def test_hold_keeps_the_terminal_state_then_clears_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, stream = _hold_project(tmp_path, monkeypatch, hold_after_run=True)
+    dismissal = HoldDismissal(tmp_path, stream, expected_state="done")
+    _patch_hold_input(monkeypatch, dismissal)
+
+    result = project.run("--hold")
+
+    assert result.exit_code == 0, (result.output, result.exception)
+    assert dismissal.calls == ["done"]
+    states = [pairs["state"] for pairs in _status_pairs(stream.getvalue())]
+    assert states[-2:] == ["done", "clear"]
+    assert states.count("clear") == 1
+    assert _terminal_pairs(stream.getvalue()) == [{"state": "done", "app": "crewplane"}]
+    assert HOLD_PROMPT in stream.getvalue()
+
+
+def test_piped_run_never_prompts_or_clears(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, stream = _hold_project(tmp_path, monkeypatch, hold_after_run=True)
+    reads = _record_hold_reads(monkeypatch)
+    monkeypatch.setattr(
+        cli,
+        "Console",
+        ConsoleFactory(file=stream, force_terminal=False, color_system=None, width=120),
+    )
+
+    result = project.run("--hold")
+
+    assert result.exit_code == 0, (result.output, result.exception)
+    assert reads == []
+    assert HOLD_PROMPT not in stream.getvalue()
+    assert "\x1b]7501;" not in stream.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("failing", "expected_exit_code"),
+    [(False, 0), (True, 1)],
+    ids=["success", "failure"],
+)
+def test_hold_preserves_the_exit_code(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failing: bool,
+    expected_exit_code: int,
+) -> None:
+    expected_state = "error" if failing else "done"
+    opted_out, unheld_stream = _hold_project(
+        tmp_path / "opted-out", monkeypatch, hold_after_run=True, failing=failing
+    )
+    unheld_reads = _record_hold_reads(monkeypatch)
+    unheld = opted_out.run("--no-hold")
+    defaulted, held_stream = _hold_project(
+        tmp_path / "defaulted", monkeypatch, hold_after_run=True, failing=failing
+    )
+    dismissal = HoldDismissal(tmp_path / "defaulted", held_stream, expected_state)
+    _patch_hold_input(monkeypatch, dismissal)
+    held = defaulted.run()
+
+    assert unheld.exit_code == expected_exit_code, (
+        unheld.output,
+        unheld.exception,
+    )
+    assert held.exit_code == unheld.exit_code, (held.output, held.exception)
+    assert unheld_reads == []
+    assert HOLD_PROMPT not in unheld_stream.getvalue()
+    assert _status_pairs(unheld_stream.getvalue())[-1] == {
+        "state": expected_state,
+        "app": "crewplane",
+    }
+    assert dismissal.calls == [expected_state]
+    assert HOLD_PROMPT in held_stream.getvalue()
+    assert _status_pairs(held_stream.getvalue())[-1] == {"state": "clear"}
+
+
+@pytest.mark.parametrize(
+    ("failing", "expected_exit_code"),
+    [(False, 0), (True, 1)],
+    ids=["success", "failure"],
+)
+def test_ctrl_c_during_the_hold_keeps_the_run_outcome(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failing: bool,
+    expected_exit_code: int,
+) -> None:
+    expected_state = "error" if failing else "done"
+    project, stream = _hold_project(
+        tmp_path, monkeypatch, hold_after_run=True, failing=failing
+    )
+    dismissal = HoldDismissal(
+        tmp_path, stream, expected_state=expected_state, interrupted=True
+    )
+    _patch_hold_input(monkeypatch, dismissal)
+
+    result = project.run("--hold")
+
+    assert result.exit_code == expected_exit_code, (result.output, result.exception)
+    assert dismissal.calls == [expected_state]
+    assert _status_pairs(stream.getvalue())[-1] == {"state": "clear"}
+    assert ("Workflow 'Repeat' failed" in stream.getvalue()) is failing
+
+
+def test_hold_flag_overrides_a_disabled_config_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, stream = _hold_project(tmp_path, monkeypatch, hold_after_run=False)
+    dismissal = HoldDismissal(tmp_path, stream, expected_state="done")
+    _patch_hold_input(monkeypatch, dismissal)
+
+    result = project.run("--hold")
+
+    assert result.exit_code == 0, (result.output, result.exception)
+    assert dismissal.calls == ["done"]
+    assert _status_pairs(stream.getvalue())[-1] == {"state": "clear"}
+
+
+def test_omitted_flag_keeps_a_disabled_config_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, stream = _hold_project(tmp_path, monkeypatch, hold_after_run=False)
+    reads = _record_hold_reads(monkeypatch)
+
+    result = project.run()
+
+    assert result.exit_code == 0, (result.output, result.exception)
+    assert reads == []
+    assert HOLD_PROMPT not in stream.getvalue()
+    assert _status_pairs(stream.getvalue())[-1] == {
+        "state": "done",
+        "app": "crewplane",
+    }
+
+
+def test_dismissal_clears_the_status_without_a_status_integration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, stream = _hold_project(
+        tmp_path, monkeypatch, hold_after_run=True, status_implementation="none"
+    )
+    reads = _record_hold_reads(monkeypatch)
+
+    result = project.run("--hold")
+
+    assert result.exit_code == 0, (result.output, result.exception)
+    assert reads == ["read"]
+    assert _status_pairs(stream.getvalue()) == [{"state": "clear"}]
+
+
+def test_lock_contention_never_holds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, stream = _hold_project(tmp_path, monkeypatch, hold_after_run=True)
+    reads = _record_hold_reads(monkeypatch)
+    first = project.run("--no-hold")
+    assert first.exit_code == 0, (first.output, first.exception)
+
+    (manifest,) = project.manifests()
+    lock = acquire_same_context_lock(
+        tmp_path / ".crewplane",
+        "Repeat",
+        manifest["workflow_identity"],
+        manifest["workflow_signature"],
+        process_inspector=FakeProcessInspector(100, "old"),
+    )
+    lock.update_run(manifest["run_id"], manifest["run_key_name"])
+    try:
+        with pytest.MonkeyPatch.context() as live_owner:
+            live_owner.setattr(
+                resume_locks,
+                "ProcessInspector",
+                partial(FakeProcessInspector, 200, "new", live=True),
+            )
+            contended = project.run("--hold")
+        assert _lock_owners(tmp_path) == [lock.lock_dir / LOCK_OWNER_FILENAME]
+    finally:
+        lock.release()
+
+    assert contended.exit_code == 1, (contended.output, contended.exception)
+    assert "Run lock unavailable" in stream.getvalue()
+    assert reads == []
+    assert HOLD_PROMPT not in stream.getvalue()
+
+
+def test_preflight_failure_never_holds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, stream = _hold_project(tmp_path, monkeypatch, hold_after_run=True)
+    reads = _record_hold_reads(monkeypatch)
+    project.prompts["node0"] = "Read {{file:missing.txt}}"
+    project.write()
+
+    result = project.run("--hold")
+
+    assert result.exit_code == 1, (result.output, result.exception)
+    assert reads == []
+    assert HOLD_PROMPT not in stream.getvalue()
+    assert _status_pairs(stream.getvalue()) == []
+
+
+def test_terminalization_failure_never_holds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, stream = _hold_project(tmp_path, monkeypatch, hold_after_run=True)
+    reads = _record_hold_reads(monkeypatch)
+
+    def fail_publication(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise OSError("run manifest could not be published")
+
+    with pytest.MonkeyPatch.context() as failed_terminalization:
+        failed_terminalization.setattr(
+            terminalization, "finalize_run_manifest", fail_publication
+        )
+        result = project.run("--hold")
+
+    assert result.exit_code == 1, (result.output, result.exception)
+    assert reads == []
+    assert HOLD_PROMPT not in stream.getvalue()
+    # The unfinalized run keeps its lock, so nothing may hold that terminal.
+    assert _lock_owners(tmp_path) != []
+
+
+def test_duplicate_context_skip_never_holds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, stream = _hold_project(tmp_path, monkeypatch, hold_after_run=True)
+    reads = _record_hold_reads(monkeypatch)
+
+    first = project.run("--hold")
+    second = project.run("--hold")
+
+    assert first.exit_code == 0, (first.output, first.exception)
+    assert second.exit_code == 0, (second.output, second.exception)
+    assert "Identical context detected" in stream.getvalue()
+    # The skipped run publishes no status, so only the first run may wait.
+    assert reads == ["read"]
+    assert stream.getvalue().count(HOLD_PROMPT) == 1
+    assert len(project.manifests()) == 1
+    assert _status_pairs(stream.getvalue()).count({"state": "clear"}) == 1
+    assert _status_pairs(stream.getvalue())[-1] == {"state": "clear"}
+
+
+def test_failure_diagnostic_prints_before_the_hold(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, stream = _hold_project(
+        tmp_path, monkeypatch, hold_after_run=True, failing=True
+    )
+    shown_at_hold: list[str] = []
+
+    def read_key() -> str:
+        shown_at_hold.append(stream.getvalue())
+        return "a"
+
+    _patch_hold_input(monkeypatch, read_key)
+
+    result = project.run("--hold")
+
+    assert result.exit_code == 1, (result.output, result.exception)
+    assert shown_at_hold, "the run failed without holding"
+    assert "✗ Workflow 'Repeat' failed" in shown_at_hold[0]
+    assert stream.getvalue().count("✗ Workflow 'Repeat' failed") == 1
+    assert _status_pairs(stream.getvalue())[-1] == {"state": "clear"}
+
+
+def test_unconfirmed_cleanup_reports_the_failure_and_its_evidence_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The workflow diagnostic and the cleanup evidence each print once, unheld."""
+    project, stream = _hold_project(
+        tmp_path, monkeypatch, hold_after_run=True, failing=True
+    )
+    reads = _record_hold_reads(monkeypatch)
+    completed_run = execution.execute_workflow_run
+    cleanup_error = ProcessDrainError(
+        ProcessDrainEvidence(
+            pid=4242,
+            process_group_id=4242,
+            leader_stopped=False,
+            process_group_stopped=False,
+        ),
+        "provider drain unresolved",
+    )
+
+    async def fail_after_finalizing(*args: object, **kwargs: object) -> bool:
+        with pytest.raises(WorkflowExecutionError) as failed_nodes:
+            await completed_run(*args, **kwargs)
+        failure = WorkflowExecutionError(
+            "Workflow 'Repeat' failed:\n- failed: node0 (forced failure)"
+        )
+        assert failed_nodes.value.__cause__ is not None
+        failure.__cause__ = cleanup_error
+        raise failure
+
+    monkeypatch.setattr(
+        cli.workflow_runner, "execute_workflow_run", fail_after_finalizing
+    )
+
+    result = project.run("--hold")
+
+    assert result.exit_code == 1, (result.output, result.exception)
+    output = stream.getvalue()
+    # Unconfirmed cleanup keeps the failure unfinalized, so even an explicit
+    # hold flag never reaches the wait.
+    assert reads == []
+    assert HOLD_PROMPT not in output
+    assert output.count("✗ Invalid: Workflow 'Repeat' failed:") == 1
+    assert output.count("- failed: node0 (forced failure)") == 1
+    assert output.count("PID 4242") == 1
+    assert output.count("process group 4242") == 1
+
+
+def test_interrupted_run_reports_unconfirmed_cleanup_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An interrupted run that passes its own cleanup error reports it once."""
+    project, stream = _hold_project(tmp_path, monkeypatch, hold_after_run=True)
+    reads = _record_hold_reads(monkeypatch)
+    cleanup_error = ProcessDrainError(
+        ProcessDrainEvidence(
+            pid=4242,
+            process_group_id=4242,
+            leader_stopped=False,
+            process_group_stopped=False,
+        ),
+        "provider drain unresolved",
+    )
+
+    async def interrupt_with_unconfirmed_cleanup(
+        *args: object, **kwargs: object
+    ) -> bool:
+        del args, kwargs
+        raise KeyboardInterrupt from cleanup_error
+
+    monkeypatch.setattr(
+        cli.workflow_runner, "execute_workflow_run", interrupt_with_unconfirmed_cleanup
+    )
+
+    result = project.run("--hold")
+
+    assert result.exit_code == 1, (result.output, result.exception)
+    output = stream.getvalue()
+    assert reads == []
+    assert HOLD_PROMPT not in output
+    assert output.count("provider drain unresolved") == 1
+    assert output.count("PID 4242") == 1
+    assert output.count("process group 4242") == 1

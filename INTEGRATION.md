@@ -123,6 +123,14 @@ Scope boundary for v1:
 Status is observational: toggling it does not change the effective execution
 signature, so saved results stay reusable.
 
+Holding a finished run on screen is separate from that port. `crewplane run
+--hold` and `settings.hold_after_run` wait for a keypress in the CLI layer, after
+the terminal state is published and the run lock is released, then emit
+`state=clear` and exit with the run's normal code. The status observer stays
+observational, and the scope boundary above is unchanged: `blocked` is still
+never emitted, and the hold reports the run's real `done` or `error` outcome. See
+[HERDR.md](./HERDR.md#holding-the-run-open).
+
 Tier 3 (mod) can consume `manifests/run.json` directly from disk, avoiding any
 crewplane JSON-output work; a `runs list --json` flag is only needed if the mod
 prefers the CLI surface. Known mod constraints from the generated typings

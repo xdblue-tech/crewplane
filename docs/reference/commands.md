@@ -199,6 +199,7 @@ Options:
 | `--dry-run`, `-n` | Preview the first run and, if repetition is set, show the total planned runs. Does not run providers or write run artifacts. |
 | `--force` | Run from the beginning, even if results from an earlier run could be reused. |
 | `--no-live` | Disable live topology dashboard output. |
+| `--hold`, `--no-hold` | Keep the terminal open after the run finishes so an [OSC 7501 status host](integrations.md#holding-the-terminal-open) keeps showing the outcome until a key is pressed. Overrides `settings.hold_after_run` for this run; only a run that finished normally or failed during execution holds, and only on an interactive terminal. |
 
 When the mock invoker is active, `run` prints that no provider CLI commands will
 be started. `run --dry-run` skips provider executable availability checks and

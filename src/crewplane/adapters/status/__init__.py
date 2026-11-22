@@ -6,6 +6,7 @@ from .osc7501 import (
     StatusState,
     StatusWriter,
     format_status_sequence,
+    write_clear_status,
     write_status_sequence,
 )
 
@@ -18,5 +19,6 @@ __all__ = [
     "StatusState",
     "StatusWriter",
     "format_status_sequence",
+    "write_clear_status",
     "write_status_sequence",
 ]

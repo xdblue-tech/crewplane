@@ -9,6 +9,9 @@ All notable user-facing changes are recorded here.
 - Report workflow lifecycle to hosting terminals with the opt-in `osc7501` status
   integration (`settings.integrations.status`), so tools that track program
   status show real run progress; the default `none` leaves output unchanged.
+- Keep a finished run visible in hosts that close the pane on exit with
+  `crewplane run --hold` or `settings.hold_after_run`, which hold the terminal
+  until a key is pressed and then clear the reported state.
 
 ### Changed
 

@@ -242,6 +242,46 @@ Status covers runs that reach observed execution. Failures before the reporter
 is created, such as config or context loading errors and run-lock contention,
 report no status; use the process exit code and the run manifest instead.
 
+#### Holding the terminal open
+
+A host such as herdr closes the pane when the program in it exits, which removes
+the entry the terminal state just set. `crewplane run --hold` keeps the terminal
+open after the run finishes until any key is pressed; `--no-hold` turns holding
+off for one run. `settings.hold_after_run: true` makes holding the project
+default. The per-run flag wins over the config key, and both default to off.
+
+The held state is the run's real outcome: `done` on success, `error` on an
+execution failure. Crewplane never holds a run as `blocked`, because that state
+means "cannot proceed until the user acts". A run is held once it finalized, not
+because of the state it published, so a run whose status integration is `none`
+also holds. A duplicate-context skip, lock contention, preflight failures, and
+user cancellation never hold. A workflow failure prints its diagnostic before
+the hold starts waiting: a node or scheduling failure reads
+`✗ Workflow '<name>' failed:` with each failed and blocked node, while a
+postcondition failure reports `Workflow postconditions failed:` with the first
+cleanup or descriptor error. Dismissing the hold writes `state=clear` — no `app`
+and no `msg`, since the terminal no longer belongs to a tracked program — and
+then exits with the run's normal exit code; Ctrl+C is a dismissal too, so the
+run keeps its own exit code instead of becoming an interrupt.
+
+`state=clear` is written whenever a terminal hold is dismissed, including when
+the configured status integration is `none`, because a held terminal is always
+released. The write is best-effort: if the terminal rejects it, crewplane warns
+and the run outcome and exit code still win. The clear keeps hosts from latching
+`done` onto the shell that replaces crewplane. Holding changes no artifacts,
+manifests, locks, or exit codes, and it runs after the terminal state is
+published and the run lock is released.
+
+Holding, like the sequences themselves, needs an interactive terminal: a
+non-terminal console never blocks and stays byte-identical, and on POSIX the
+hold also requires a terminal on stdin. If stdin is unavailable or reading it
+fails while stdout is a terminal, crewplane writes `state=clear` and exits
+without waiting, so nothing is left latched and the run keeps its exit code. A CI
+job or script that allocates a tty can block, so keep the flag and the config
+off in automation. Under a host that allocates a terminal for the run, such as
+`hc run`, a held run keeps waiting until someone presses a key; leave holding
+off for automated terminals.
+
 ### `none`
 
 The `none` status integration disables status reporting. It is the default.

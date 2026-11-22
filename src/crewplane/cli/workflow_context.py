@@ -147,14 +147,28 @@ def raise_context_loading_failure(
     console: Console,
     paths: CliWorkflowPaths | None = None,
     write_diagnostics: bool = False,
+    include_original: bool = True,
 ) -> Never:
+    """Report a failure that stopped the run with its cleanup evidence.
+
+    ``include_original`` is for a caller that already printed the failure and
+    now needs only the unconfirmed cleanup that keeps the run from finalizing.
+    """
     message = str(exc)
     cleanup_error = unconfirmed_process_cleanup(exc)
     if cleanup_error is not None:
         evidence = cleanup_error.evidence
-        message = (
+        cleanup_message = (
             f"{cleanup_error} (PID {evidence.pid}, "
             f"process group {evidence.process_group_id})"
+        )
+        # A caller that passes the drain error itself reports one failure, not
+        # the same reason once on its own and again with its evidence.
+        repeats_original = cleanup_error is exc or str(cleanup_error) == message
+        message = (
+            f"{message}\n{cleanup_message}"
+            if include_original and not repeats_original
+            else cleanup_message
         )
     if write_diagnostics and paths is not None:
         workflow_runner.write_early_preflight_failure_run(
