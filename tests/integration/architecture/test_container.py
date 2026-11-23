@@ -1,4 +1,5 @@
 import asyncio
+import importlib
 import io
 import unittest
 from dataclasses import FrozenInstanceError
@@ -23,6 +24,7 @@ from crewplane.architecture.contracts import (
     CanonicalIntegrationConfig,
     JsonObject,
     ObserverCapabilities,
+    RunResult,
     build_findings_filename,
     build_result_filename,
 )
@@ -936,6 +938,7 @@ def test_status_reporter_is_created_independently_of_the_live_ui(
         console,
         True,
         status_options={"unsupported": True},
+        workflow_path=tmp_path / "workflows" / "status-plan.task.md",
     )
 
     create_reporter.assert_called_once_with(
@@ -946,6 +949,160 @@ def test_status_reporter_is_created_independently_of_the_live_ui(
     )
     assert components.observers == ()
     assert components.status_observer is reporter
+
+
+_STATUS_PLUGINS = (
+    Path(__file__).resolve().parents[2] / "fixtures" / "status" / "status_plugins.py"
+)
+
+
+def _status_plugin_module(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.syspath_prepend(str(_STATUS_PLUGINS.parent))
+    return importlib.import_module("status_plugins")
+
+
+def _status_plugin_config(implementation: str) -> Config:
+    return Config(
+        version=SCHEMA_VERSION,
+        agents={"alpha": AgentConfig(cli_cmd=["mock"])},
+        settings=Settings(
+            integrations={
+                "invoker": {"implementation": "mock"},
+                "ui": {"implementation": "none"},
+                "status": {"implementation": implementation},
+            }
+        ),
+    )
+
+
+def _build_status_plugin_components(
+    config: Config,
+    tmp_path: Path,
+    console: Console,
+    *,
+    workflow_path: Path | None,
+):
+    return build_runtime_components(
+        config,
+        topology_from_workflow(WorkflowPlan(name="status-plugin", nodes=[])),
+        tmp_path / "state",
+        tmp_path,
+        console,
+        True,
+        status_options={"probe": True},
+        workflow_path=workflow_path,
+    )
+
+
+def test_legacy_status_plugin_receives_its_original_arguments_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plugins = _status_plugin_module(monkeypatch)
+    plugins.LegacyStatusReporter.reset()
+    config = _status_plugin_config("status_plugins:LegacyStatusReporter")
+    console = Console(file=io.StringIO(), force_terminal=False)
+    workflow_path = tmp_path / "flows" / "status-plan.task.md"
+
+    components = _build_status_plugin_components(
+        config, tmp_path, console, workflow_path=workflow_path
+    )
+
+    (call,) = plugins.LegacyStatusReporter.calls
+    assert call.factory == "create_reporter"
+    assert call.config is config
+    assert call.run_id == components.artifact_store.run_id
+    assert call.console is console
+    assert call.options == {"probe": True}
+    assert call.workflow_path is None
+    observer = components.status_observer
+    assert isinstance(observer, plugins.RecordingObserver)
+    assert observer.run_id == components.artifact_store.run_id
+    observer.publish_terminal_status(RunResult(status="succeeded"))
+    assert observer.terminal_states == ["succeeded"]
+
+
+def test_a_legacy_status_plugin_type_error_is_not_retried(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plugins = _status_plugin_module(monkeypatch)
+    plugins.LegacyStatusReporter.reset()
+    plugins.LegacyStatusReporter.fail = True
+    config = _status_plugin_config("status_plugins:LegacyStatusReporter")
+    console = Console(file=io.StringIO(), force_terminal=False)
+
+    with pytest.raises(TypeError, match="inside create_reporter"):
+        _build_status_plugin_components(
+            config,
+            tmp_path,
+            console,
+            workflow_path=tmp_path / "flows" / "status-plan.task.md",
+        )
+
+    assert len(plugins.LegacyStatusReporter.calls) == 1
+
+
+def test_a_status_plugin_capability_receives_the_resolved_workflow_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plugins = _status_plugin_module(monkeypatch)
+    plugins.WorkflowStatusReporter.reset()
+    config = _status_plugin_config("status_plugins:WorkflowStatusReporter")
+    console = Console(file=io.StringIO(), force_terminal=False)
+    workflow_path = tmp_path / "flows" / "status-plan.task.md"
+
+    components = _build_status_plugin_components(
+        config, tmp_path, console, workflow_path=workflow_path
+    )
+
+    (call,) = plugins.WorkflowStatusReporter.calls
+    assert call.factory == "create_reporter_for_workflow"
+    assert call.config is config
+    assert call.run_id == components.artifact_store.run_id
+    assert call.console is console
+    assert call.options == {"probe": True}
+    assert call.workflow_path == workflow_path
+    assert components.status_observer.factory == "create_reporter_for_workflow"
+
+
+def test_a_status_plugin_capability_is_unused_without_a_resolved_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plugins = _status_plugin_module(monkeypatch)
+    plugins.WorkflowStatusReporter.reset()
+    config = _status_plugin_config("status_plugins:WorkflowStatusReporter")
+    console = Console(file=io.StringIO(), force_terminal=False)
+
+    components = _build_status_plugin_components(
+        config, tmp_path, console, workflow_path=None
+    )
+
+    (call,) = plugins.WorkflowStatusReporter.calls
+    assert call.factory == "create_reporter"
+    assert components.status_observer.factory == "create_reporter"
+
+
+def test_a_status_plugin_capability_result_is_validated_like_the_legacy_factory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plugins = _status_plugin_module(monkeypatch)
+    plugins.BrokenWorkflowStatusReporter.reset()
+    config = _status_plugin_config("status_plugins:BrokenWorkflowStatusReporter")
+    console = Console(file=io.StringIO(), force_terminal=False)
+
+    with pytest.raises(AdapterContractError, match="ObserverCapabilities"):
+        _build_status_plugin_components(
+            config,
+            tmp_path,
+            console,
+            workflow_path=tmp_path / "flows" / "status-plan.task.md",
+        )
+
+    assert len(plugins.BrokenWorkflowStatusReporter.calls) == 1
 
 
 def test_status_options_default_to_a_copy_of_configured_options(

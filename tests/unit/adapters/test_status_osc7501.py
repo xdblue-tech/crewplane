@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import io
+import re
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from crewplane.adapters.status import (
     Osc7501StatusReporter,
     companion_record_id,
     companion_title,
+    format_clear_sequence,
     format_status_sequence,
     write_clear_status,
     write_status_sequence,
@@ -98,6 +100,30 @@ def _append_sequence(
     )
 
 
+_STATUS_SEQUENCE = re.compile(rb"\x1b\]7501;(?P<payload>[^\x1b]*)\x1b\\")
+
+
+def _apply_record_sequence(records: dict[str, dict[str, str]], sequence: bytes) -> None:
+    """Apply the host rules: clear is recursive, an ordinary report replaces one record."""
+
+    match = _STATUS_SEQUENCE.fullmatch(sequence)
+    assert match is not None
+    fields = dict(
+        pair.split("=", 1) for pair in match.group("payload").decode("ascii").split(":")
+    )
+    key = fields.pop("id", None)
+    if fields["state"] == "clear":
+        if key is None:
+            records.clear()
+        else:
+            for record_key in tuple(records):
+                if record_key == key or record_key.startswith(f"{key}/"):
+                    del records[record_key]
+        return
+    if key is not None:
+        records[key] = fields
+
+
 def test_format_status_sequence_encodes_message_as_base64() -> None:
     sequence = format_status_sequence("working", msg="Task")
 
@@ -127,10 +153,7 @@ def test_format_status_sequence_writes_a_record_id_and_title() -> None:
 
 
 def test_companion_record_id_keeps_the_exact_run_id() -> None:
-    assert (
-        companion_record_id("20261122-134628")
-        == "crewplane/20261122-134628"
-    )
+    assert companion_record_id("20261122-134628") == "crewplane/20261122-134628"
     assert companion_record_id("a" * 32) == f"crewplane/{'a' * 32}"
 
 
@@ -151,8 +174,7 @@ def test_companion_record_id_omits_a_run_id_that_cannot_be_one_segment(
 
 def test_companion_title_is_the_workflow_basename_without_the_suffix() -> None:
     assert (
-        companion_title(Path("/repo/.crewplane/workflows/review.task.md"))
-        == "review"
+        companion_title(Path("/repo/.crewplane/workflows/review.task.md")) == "review"
     )
     assert companion_title(Path("/repo/flows/review.md")) == "review.md"
     assert companion_title(Path("/repo/flows/.task.md")) is None
@@ -240,7 +262,9 @@ def test_companion_record_follows_the_first_running_node() -> None:
         title="status-flow",
     )
     feed = _SnapshotFeed(_topology())
-    observer.start(RunContext(workflow_topology=_topology(), run_id=RUN_ID, refresh_per_second=4))
+    observer.start(
+        RunContext(workflow_topology=_topology(), run_id=RUN_ID, refresh_per_second=4)
+    )
 
     events = [
         node_event(EventType.NODE_STARTED, WORKFLOW_NAME, RUN_ID, "second"),
@@ -249,7 +273,12 @@ def test_companion_record_follows_the_first_running_node() -> None:
     observer.on_snapshot(None, feed.snapshot(events))
 
     assert writer.sequences == [
-        format_status_sequence("working", msg="first"),
+        format_status_sequence("idle", record_id="crewplane/20261122-134628"),
+        format_status_sequence(
+            "working",
+            msg="first",
+            title="crewplane/20261122-134628",
+        ),
         format_status_sequence(
             "working",
             msg="first",
@@ -270,7 +299,12 @@ def test_companion_omits_the_node_when_no_node_is_running() -> None:
     observer.on_snapshot(None, _SnapshotFeed(_topology()).snapshot())
 
     assert writer.sequences == [
-        format_status_sequence("working", msg=WORKFLOW_NAME),
+        format_status_sequence("idle", record_id="crewplane/20261122-134628"),
+        format_status_sequence(
+            "working",
+            msg=WORKFLOW_NAME,
+            title="crewplane/20261122-134628",
+        ),
         format_status_sequence(
             "working",
             record_id="crewplane/20261122-134628",
@@ -279,7 +313,9 @@ def test_companion_omits_the_node_when_no_node_is_running() -> None:
     ]
 
 
-def test_terminal_state_keeps_the_companion_metadata_without_a_node() -> None:
+def test_a_final_only_run_replaces_its_exact_record_and_keeps_companion_metadata() -> (
+    None
+):
     writer = _RecordingWriter()
     observer = _append_sequence(
         writer,
@@ -290,7 +326,8 @@ def test_terminal_state_keeps_the_companion_metadata_without_a_node() -> None:
     observer.publish_terminal_status(RunResult(status="succeeded"))
 
     assert writer.sequences == [
-        format_status_sequence("done"),
+        format_status_sequence("idle", record_id="crewplane/20261122-134628"),
+        format_status_sequence("done", title="crewplane/20261122-134628"),
         format_status_sequence(
             "done",
             record_id="crewplane/20261122-134628",
@@ -321,20 +358,100 @@ def test_companion_resends_its_fields_when_the_node_changes() -> None:
     observer.on_snapshot(finish, feed.snapshot([finish]))
 
     assert writer.sequences == [
-        format_status_sequence("working", msg="first"),
+        format_status_sequence("idle", record_id="crewplane/20261122-134628"),
+        format_status_sequence(
+            "working",
+            msg="first",
+            title="crewplane/20261122-134628",
+        ),
         format_status_sequence(
             "working",
             msg="first",
             record_id="crewplane/20261122-134628",
             title="status-flow",
         ),
-        format_status_sequence("working", msg=WORKFLOW_NAME),
+        format_status_sequence(
+            "working",
+            msg=WORKFLOW_NAME,
+            title="crewplane/20261122-134628",
+        ),
         format_status_sequence(
             "working",
             record_id="crewplane/20261122-134628",
             title="status-flow",
         ),
     ]
+
+
+def test_a_marked_run_replaces_its_exact_record_once_before_its_first_report() -> None:
+    writer = _RecordingWriter()
+    observer = _append_sequence(
+        writer, record_id="crewplane/20261122-134628", title="status-flow"
+    )
+    feed = _SnapshotFeed(_topology())
+
+    observer.on_snapshot(None, feed.snapshot())
+    observer.on_snapshot(None, feed.snapshot())
+    observer.publish_terminal_status(RunResult(status="succeeded"))
+
+    invalidation = format_status_sequence("idle", record_id="crewplane/20261122-134628")
+    assert writer.sequences[0] == invalidation
+    assert writer.sequences.count(invalidation) == 1
+    assert not any(
+        sequence.startswith(b"\x1b]7501;state=clear") for sequence in writer.sequences
+    )
+    assert writer.sequences[1] == format_status_sequence(
+        "working", msg=WORKFLOW_NAME, title="crewplane/20261122-134628"
+    )
+
+
+def test_the_startup_replacement_preserves_descendants_and_other_records() -> None:
+    key = "crewplane/20261122-134628"
+    child = f"{key}/child"
+    deep = f"{child}/deep"
+    sibling = "crewplane/20261122-120000"
+    records = {
+        key: {
+            "state": "working",
+            "app": "crewplane",
+            "title": base64.b64encode(b"alpha").decode("ascii"),
+            "msg": base64.b64encode(b"old.node").decode("ascii"),
+        },
+        child: {
+            "state": "working",
+            "app": "pi-subagents",
+            "title": base64.b64encode(b"foreign-child").decode("ascii"),
+            "msg": base64.b64encode(b"child.node").decode("ascii"),
+        },
+        deep: {
+            "state": "done",
+            "app": "other",
+            "title": base64.b64encode(b"foreign-deep").decode("ascii"),
+        },
+        sibling: {
+            "state": "idle",
+            "app": "crewplane",
+            "title": base64.b64encode(b"sibling").decode("ascii"),
+        },
+    }
+    untouched = {name: dict(fields) for name, fields in records.items() if name != key}
+
+    writer = _RecordingWriter()
+    observer = _append_sequence(writer, record_id=key, title="beta")
+    observer.on_snapshot(None, _SnapshotFeed(_topology()).snapshot())
+
+    assert writer.sequences[0] == format_status_sequence("idle", record_id=key)
+    for index, sequence in enumerate(writer.sequences):
+        _apply_record_sequence(records, sequence)
+        if index == 0:
+            assert records[key] == {"state": "idle", "app": "crewplane"}
+        assert {name: records[name] for name in untouched} == untouched
+
+    assert records[key] == {
+        "state": "working",
+        "app": "crewplane",
+        "title": base64.b64encode(b"beta").decode("ascii"),
+    }
 
 
 def test_repeated_activity_publishes_each_state_once() -> None:
@@ -401,6 +518,14 @@ def test_write_status_sequence_writes_exact_bytes_without_newline() -> None:
     assert not stream.getvalue().endswith("\n")
 
 
+def test_format_clear_sequence_retires_one_record_or_all_of_them() -> None:
+    assert format_clear_sequence() == b"\x1b]7501;state=clear\x1b\\"
+    assert (
+        format_clear_sequence("crewplane/20261122-134628")
+        == b"\x1b]7501;state=clear:id=crewplane/20261122-134628\x1b\\"
+    )
+
+
 def test_write_clear_status_writes_exactly_the_clear_state() -> None:
     stream = io.StringIO()
     console = Console(file=stream, force_terminal=True, color_system=None)
@@ -441,9 +566,9 @@ def test_create_reporter_returns_synchronous_best_effort_observer() -> None:
     assert observer.stop_requested is False
 
 
-def test_create_reporter_uses_the_run_and_workflow_identity() -> None:
+def test_create_reporter_for_workflow_points_at_the_run_and_workflow() -> None:
     stream = io.StringIO()
-    observer = Osc7501StatusReporter().create_reporter(
+    observer = Osc7501StatusReporter().create_reporter_for_workflow(
         config=Config(version=SCHEMA_VERSION, agents={}),
         run_id="20261122-134628",
         console=Console(file=stream, force_terminal=True, color_system=None),
@@ -455,7 +580,12 @@ def test_create_reporter_uses_the_run_and_workflow_identity() -> None:
     assert stream.getvalue() == "".join(
         sequence.decode("ascii")
         for sequence in (
-            format_status_sequence("working", msg=WORKFLOW_NAME),
+            format_status_sequence("idle", record_id="crewplane/20261122-134628"),
+            format_status_sequence(
+                "working",
+                msg=WORKFLOW_NAME,
+                title="crewplane/20261122-134628",
+            ),
             format_status_sequence(
                 "working",
                 record_id="crewplane/20261122-134628",
@@ -465,7 +595,7 @@ def test_create_reporter_uses_the_run_and_workflow_identity() -> None:
     )
 
 
-def test_create_reporter_without_a_workflow_path_has_no_companion() -> None:
+def test_create_reporter_reports_the_root_record_only() -> None:
     stream = io.StringIO()
     observer = Osc7501StatusReporter().create_reporter(
         config=Config(version=SCHEMA_VERSION, agents={}),
@@ -480,13 +610,53 @@ def test_create_reporter_without_a_workflow_path_has_no_companion() -> None:
     ).decode("ascii")
 
 
+def test_create_reporter_for_workflow_keeps_the_root_record_when_the_run_id_cannot_fit() -> (
+    None
+):
+    stream = io.StringIO()
+    observer = Osc7501StatusReporter().create_reporter_for_workflow(
+        config=Config(version=SCHEMA_VERSION, agents={}),
+        run_id="run/child",
+        console=Console(file=stream, force_terminal=True, color_system=None),
+        workflow_path=Path("/repo/flows/review.task.md"),
+    )
+
+    observer.on_snapshot(None, _SnapshotFeed(_topology()).snapshot())
+
+    assert stream.getvalue() == format_status_sequence(
+        "working", msg=WORKFLOW_NAME
+    ).decode("ascii")
+
+
+@pytest.mark.parametrize(
+    ("record_id", "title"),
+    [
+        (None, "status-flow"),
+        ("crewplane/20261122-134628", None),
+    ],
+)
+def test_an_incomplete_companion_identity_leaves_the_root_unmarked(
+    record_id: str | None,
+    title: str | None,
+) -> None:
+    writer = _RecordingWriter()
+    observer = _append_sequence(writer, record_id=record_id, title=title)
+
+    observer.on_snapshot(None, _SnapshotFeed(_topology()).snapshot())
+    observer.publish_terminal_status(RunResult(status="succeeded"))
+
+    assert writer.sequences == [
+        format_status_sequence("working", msg=WORKFLOW_NAME),
+        format_status_sequence("done"),
+    ]
+
+
 @pytest.mark.parametrize(
     ("field", "value", "error"),
     [
         ("config", {}, TypeError),
         ("run_id", "", ValueError),
         ("console", object(), TypeError),
-        ("workflow_path", "flows/review.task.md", TypeError),
     ],
 )
 def test_create_reporter_rejects_invalid_boundary_values(
@@ -503,3 +673,13 @@ def test_create_reporter_rejects_invalid_boundary_values(
 
     with pytest.raises(error, match=field):
         Osc7501StatusReporter().create_reporter(**request)  # type: ignore[arg-type]
+
+
+def test_create_reporter_for_workflow_rejects_an_invalid_workflow_path() -> None:
+    with pytest.raises(TypeError, match="workflow_path"):
+        Osc7501StatusReporter().create_reporter_for_workflow(
+            config=Config(version=SCHEMA_VERSION, agents={}),
+            run_id=RUN_ID,
+            console=Console(file=io.StringIO()),
+            workflow_path="flows/review.task.md",  # type: ignore[arg-type]
+        )

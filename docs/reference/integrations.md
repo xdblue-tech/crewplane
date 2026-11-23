@@ -209,10 +209,11 @@ run. They are independent of the `ui` integration: reporting works with
 
 The `osc7501` status integration writes Program Status Protocol sequences to
 stdout for hosts such as [herdr-core](https://github.com/herdrdev/herdr-core),
-which track them without screen scraping:
+which track them without screen scraping. The root record reports the run's own
+lifecycle:
 
 ```
-ESC ] 7501 ; state=working : app=crewplane : msg=<base64> ESC \
+ESC ] 7501 ; state=working : app=crewplane : msg=<base64> [ : title=<base64> ] ESC \
 ```
 
 | Field | Meaning |
@@ -220,6 +221,57 @@ ESC ] 7501 ; state=working : app=crewplane : msg=<base64> ESC \
 | `state` | `working` during the run; `done`, `error`, or `idle` once at the end. |
 | `app` | Always `crewplane`. |
 | `msg` | Base64-encoded one-line activity label: the workflow name, or the running node id. Absent on terminal states. |
+| `title` | Present only when the run also reports a companion record: base64 of that record's id, `crewplane/<run-id>`. It names the record this run owns, so a consumer does not have to guess among the terminal's records. |
+
+A run that can report its workflow identity also reports one companion record
+beside the root record. "Can" means the run has a resolved workflow file whose
+basename is a name, and its exact run ID is one protocol record segment:
+
+```
+ESC ] 7501 ; state=working : id=crewplane/<run-id> : app=crewplane
+          : title=<base64> : msg=<base64> ESC \
+```
+
+| Field | Meaning |
+| --- | --- |
+| `state` | Mirrors the root record's state, so a consumer can require the two to agree. |
+| `id` | `crewplane/<run-id>`, the exact run ID from the run manifest. |
+| `app` | Always `crewplane`. |
+| `title` | Base64-encoded workflow file basename without `.task.md`, from the resolved workflow path. |
+| `msg` | Base64-encoded first running node ID in workflow order. Absent when no node is running, including a held completion. |
+
+Exact run IDs can repeat across workflows, so the run first replaces whatever an
+earlier run left at its own key. Once per run, before its first marked root, it
+writes an ordinary, untitled idle record at that exact key:
+
+```
+ESC ] 7501 ; state=idle : id=crewplane/<run-id> : app=crewplane ESC \
+```
+
+This replaces that one record, not the records beneath the key and not the
+terminal's other records, and no global clear is added. If no record exists at
+that key, the report inserts one; when the host's record store is full, that
+insertion follows the host's bounded eviction policy described below. Each
+working and final report then writes root, then companion. A run that cannot
+name a companion writes the ordinary root alone: no `title` pointer and no
+exact-key replacement. A consumer that finds no pointer, no record at the
+pointed key, a record from another program, no workflow title, or states that
+disagree has no verified identity and must fall back instead of reading
+another record. The pointer fits within the protocol's `title` limit; an
+invalid companion `title` value is a separate concern.
+
+The host's record store is bounded. Replacing an existing key does not evict
+another record. Inserting an absent key while the store is full can evict a
+record under the host's normal bounded policy; the installed herdr-core was
+observed to hold 255 records and to evict one unrelated record for such an
+insertion. That is a host limit, not a Crewplane-configured limit or capacity
+check: Crewplane writes the same exact-key idle report regardless of how many
+records the terminal already has.
+
+Every report replaces the whole record, so the title is resent with each change
+and a terminal state keeps it without a stale node. `state=clear` with no `id`
+still clears the terminal's root and companion records together, for example
+when a held run is dismissed.
 
 A successful run ends with `state=done`, a failed run with `state=error`, and a
 cancelled run with `state=idle`. `working` is deduplicated as a whole sequence,
@@ -332,7 +384,13 @@ and `stop` before a run begins. Status integrations return an observer from
 synchronously, and are carried separately from UI observers. Composition rejects
 a status observer that declares `required=True`, defers snapshot delivery, or
 requests run cancellation, and it publishes the terminal status through a
-separate method after the run outcome is final. The run path also pins that
+separate method after the run outcome is final. A status adapter that can report
+workflow identity also implements `create_reporter_for_workflow(...)`, an
+optional capability with its own factory name. Composition calls it, with the
+resolved workflow path, only when the adapter implements that capability and a
+path was resolved; otherwise it calls `create_reporter()` once with exactly the
+original arguments, so an existing plugin needs no migration. The returned
+observer is validated the same way on either branch. The run path also pins that
 contract for the observer's whole lifecycle, so a status observer cannot request
 cancellation after it starts. Persistent required observers and best-effort UI
 observers express their delivery and cleanup behavior through that capability

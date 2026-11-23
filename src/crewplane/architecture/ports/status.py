@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from rich.console import Console
 
@@ -33,11 +33,32 @@ class StatusReporterPort(IntegrationOptionsCanonicalizerPort, Protocol):
         run_id: str,
         console: Console,
         options: JsonObject | None = None,
-        workflow_path: Path | None = None,
     ) -> StatusObserver:
-        """Build the observer that reports run status to the hosting terminal.
+        """Build the observer that reports run status to the hosting terminal."""
 
-        ``workflow_path`` is the resolved workflow file the run was started from;
-        adapters that report workflow identity derive it from this path rather
-        than from the workflow's human title or a filesystem scan.
+
+@runtime_checkable
+class WorkflowStatusReporterPort(Protocol):
+    """Optional status-factory capability for reporting the run's workflow file.
+
+    It is a separate method, not another keyword on :class:`StatusReporterPort`,
+    so an existing plugin written against the original factory keeps receiving
+    exactly its original arguments. An adapter opts in by implementing this
+    method; otherwise only :meth:`StatusReporterPort.create_reporter` is called.
+    """
+
+    def create_reporter_for_workflow(
+        self,
+        config: Config,
+        run_id: str,
+        console: Console,
+        options: JsonObject | None = None,
+        *,
+        workflow_path: Path,
+    ) -> StatusObserver:
+        """Build the observer for a run whose resolved workflow file is known.
+
+        ``workflow_path`` is the resolved file the run was started from, so the
+        adapter derives workflow identity from the run's own source rather than
+        from a human title or a filesystem scan.
         """

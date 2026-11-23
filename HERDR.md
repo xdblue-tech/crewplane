@@ -71,10 +71,41 @@ toggle the mod to "All spaces".
 - While the run executes: `state=working` with `app=crewplane` and a `msg`
   label that is the base64 of the workflow name, or of the currently running
   node id when one is active. The label changes as nodes start.
+- When the run can name a companion record, that same root also carries
+  `title=<base64 crewplane/<run-id>>`: the record this run owns. "Can" means
+  the exact run ID is one protocol segment and the resolved workflow file has a
+  name. Beside the root, the companion holds the display identity:
+  `id=crewplane/<run-id>:app=crewplane:title=<base64 workflow basename>` with
+  `msg` set only to the first running node in workflow order. The basename
+  comes from the resolved workflow path, so auto-discovered (`--force`) and
+  wrapper launches carry it too. Every report replaces the record, so a
+  terminal state keeps the title without a stale node.
+- Run IDs can repeat across workflows, so before its first marked root a run
+  replaces any record an earlier run left at that same key with an ordinary
+  untitled idle report: `state=idle:id=crewplane/<run-id>:app=crewplane`. That
+  replaces the one exact record, not its descendants or the terminal's other
+  records; no clear is added. Then every working and final report writes root,
+  then companion. A run that cannot name a companion writes the plain root
+  alone: no pointer, no exact-key replacement. A record that is missing,
+  unmarked, from another program, or not in the same raw state is not verified
+  identity, and a reader falls back rather than reading another record.
+- The host's record store is bounded. Replacing an existing key does not evict
+  another record; inserting an absent key while the store is full can evict one
+  under the host's normal policy. The installed herdr-core held 255 records in
+  the live check. That is a host limit, not a Crewplane-configured one: the
+  producer neither detects nor enforces capacity.
 - At the end, exactly one terminal state: `done` on success, `error` on
   failure, `idle` on cancellation. It is published only after the run outcome
   is final (required observers stopped, manifest published), so a late failure
-  reports `error` rather than a premature `done`.
+  reports `error` rather than a premature `done`. The companion mirrors that
+  state.
+- A host that clears the terminal with `state=clear` (no `id`) clears the root
+  and companion records together, for example when a held run is dismissed.
+  The `spaces-agents` mod reads the record its own terminal's root points at,
+  showing the workflow name, run ID, and current node, and falls back to the
+  safe `--tasks` name and then `Crewplane` when no record is verified. Its
+  contract is documented in that mod's `README.md` under
+  `~/.config/herdr-app/mods/spaces-agents/`.
 - Visibility is bounded by herdr's lifecycle rules: a normal program exit
   closes the pane and removes its entry. A crewplane run appears as "Working"
   while it runs, but does not linger as a "Done" entry the way long-lived agents
@@ -155,16 +186,21 @@ Two levels:
      | grep -ao "7501;[^\x1b]*"
    ```
 
-   Expect repeated `state=working:app=crewplane:msg=<base64>` lines and one
-   final `state=done` (or `error`/`idle`). Piping the run directly (no `script`
-   wrapper) must yield zero matches — piped output stays byte-identical.
+   Expect repeated `state=working:app=crewplane:msg=<base64>` root lines with
+   `title=crewplane/<run-id>`, one companion line per report
+   (`id=crewplane/<run-id>:app=crewplane:title=...`, with `msg` only while a
+   node runs), and one final `state=done` (or `error`/`idle`) root plus
+   companion. The first line is the exact-key untitled idle replacement,
+   `state=idle:id=crewplane/<run-id>:app=crewplane`.
+   Piping the run directly (no `script` wrapper) must yield zero matches —
+   piped output stays byte-identical.
 
 2. **With herdr** — run the workflow in a herdr tab and watch
    `hc events` (or `hc get review`) for a `status` fact with `state=working`
-   and `app=crewplane` on that terminal. If events show the status but the
-   sidebar does not, the mod's space scope is hiding it; if no event arrives,
-   the run is not on a herdr-managed pty or the project config does not enable
-   the integration.
+   and `app=crewplane` on that terminal, plus a `records` entry keyed
+   `crewplane/<run-id>`. If events show the status but the sidebar does not,
+   the mod's space scope is hiding it; if no event arrives, the run is not on a
+   herdr-managed pty or the project config does not enable the integration.
 
 ## Failure semantics
 
@@ -190,8 +226,10 @@ repository.
 
 ## Source references
 
-- Emission: `src/crewplane/adapters/status/osc7501.py` (wire format, tty
-  gating, dedupe, write-failure disable, `state=clear` on hold dismissal)
+- Emission: `src/crewplane/adapters/status/osc7501.py` (root pointer and
+  companion wire format, exact-key idle replacement, run-id fit check,
+  workflow basename, tty gating, dedupe, write-failure disable, `state=clear`
+  on hold dismissal)
 - Run-path publication: `src/crewplane/cli/run/observability.py`
   (`publish_terminal_status`, after manifest finalization)
 - Hold after the run: `src/crewplane/cli/run/hold.py`, wired in

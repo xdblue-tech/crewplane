@@ -12,6 +12,10 @@ All notable user-facing changes are recorded here.
 - Keep a finished run visible in hosts that close the pane on exit with
   `crewplane run --hold` or `settings.hold_after_run`, which hold the terminal
   until a key is pressed and then clear the reported state.
+- Report each run's exact run ID, resolved workflow file name, and first running
+  node as one companion program-status record that the run's own root status
+  points at, so a host sidebar can identify the run without scanning disk and
+  without attributing an earlier run's record to it.
 
 ### Changed
 

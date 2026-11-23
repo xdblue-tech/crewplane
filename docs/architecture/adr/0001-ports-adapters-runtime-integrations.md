@@ -138,6 +138,13 @@ The prior structure had meaningful seams but orchestration wiring still hardcode
   availability and progress-output selection stay keyed to UI integration.
   Status options are observational and excluded from the effective execution
   signature, so toggling reporting does not invalidate saved results.
+- **2026-11-22**: A status adapter may opt into
+  `create_reporter_for_workflow()`, a separate factory capability, to receive the
+  resolved workflow path and report workflow identity from the run's own source
+  rather than a human title or a filesystem scan. `create_reporter()` keeps its
+  original signature, so external plugins need no migration. `osc7501` uses the
+  capability for one companion record whose exact key the run's root status
+  names, after retiring any record an earlier run left at that key.
 
 ## Follow-ups
 1. Add `llm_api` invoker adapter.

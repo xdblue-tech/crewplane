@@ -22,6 +22,7 @@ from crewplane.architecture.ports import (
     StatusObserver,
     StatusReporterPort,
     UIAdapterPort,
+    WorkflowStatusReporterPort,
 )
 from crewplane.architecture.ports.runtime import RuntimeComponents, UIRuntimePlan
 from crewplane.core.config import Config, IntegrationSpec
@@ -64,10 +65,10 @@ def build_runtime_components(
     status reporter regardless of the live UI gate, because status reporting
     only depends on the status integration and ``status_options``; keep its
     observer separate from UI observers. ``workflow_path`` is the resolved
-    workflow file, passed through for adapters that report workflow identity.
-    Return observers without starting them. Errors propagate without rolling
-    back an already allocated store.
-    """""
+    workflow file, offered to a status adapter that opts into
+    ``create_reporter_for_workflow``. Return observers without starting them.
+    Errors propagate without rolling back an already allocated store.
+    """
 
     settings = config.settings
 
@@ -149,13 +150,24 @@ def _create_status_reporter(
     options: JsonObject | None,
     workflow_path: Path | None,
 ) -> StatusObserver:
-    status_observer = status_adapter.create_reporter(
-        config=config,
-        run_id=artifact_store.run_id,
-        console=console,
-        options=options if options is not None else dict(status_spec.options),
-        workflow_path=workflow_path,
-    )
+    selected_options = options if options is not None else dict(status_spec.options)
+    if workflow_path is not None and isinstance(
+        status_adapter, WorkflowStatusReporterPort
+    ):
+        status_observer = status_adapter.create_reporter_for_workflow(
+            config=config,
+            run_id=artifact_store.run_id,
+            console=console,
+            options=selected_options,
+            workflow_path=workflow_path,
+        )
+    else:
+        status_observer = status_adapter.create_reporter(
+            config=config,
+            run_id=artifact_store.run_id,
+            console=console,
+            options=selected_options,
+        )
     _validate_status_observer_contract(status_observer, status_spec.implementation)
     return status_observer
 

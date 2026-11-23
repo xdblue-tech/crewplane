@@ -103,17 +103,41 @@ settings:
 What crewplane emits (`src/crewplane/adapters/status/osc7501.py`):
 
 - `state=working:app=crewplane:msg=<base64 workflow name or running node id>`
-  while the run executes;
+  while the run executes; a run that reports a companion also adds
+  `title=<base64 crewplane/<exact run id>>` to name that record;
+- one companion record per verifiable run:
+  `id=crewplane/<exact run id>:app=crewplane:title=<base64 workflow basename>`
+  with `msg` only for the first running node in workflow order;
 - exactly one terminal state per run: `done` on success, `error` on failure,
-  `idle` on cancellation.
+  `idle` on cancellation, mirrored by the companion;
+- once per run, before its first marked root,
+  `state=idle:id=crewplane/<exact run id>:app=crewplane`, an ordinary untitled
+  idle report that replaces one record an earlier run left at that same key.
+  Run IDs can repeat across workflows; the replacement is not recursive, so
+  records beneath the key and other records stay untouched. If no record exists
+  at that key, the report inserts one; when the host's bounded store is full,
+  that insertion can evict one record under the host's normal policy (the
+  installed herdr-core held 255 records). That is a host limit, not a
+  Crewplane-configured limit or capacity check.
+
+A run reports a companion only when it has a resolved workflow file name and its
+exact run ID is one protocol record segment; otherwise it writes the plain root,
+with no pointer and no exact-key replacement. The companion title comes from the
+resolved workflow path, so `--force` (auto-discovery) and wrapper launches
+report it as well. The ID is never hashed or truncated. A report replaces the
+whole record, so completion keeps the title and drops the node. A consumer reads
+the record only when the root's `title` names it, the record is Crewplane's, and
+their raw states agree; anything else falls back. Clearing the terminal
+(`state=clear`, no `id`) clears root and companion together, as when a held run
+is dismissed.
 
 Scope boundary for v1:
 
 - No `state=blocked`. Crewplane's `NODE_BLOCKED` event is an internal dependency
   wait, not a host-facing permission/question/auth block.
-- No `progress` percentage, and no `msg` on `error`: base64 is an encoding, not
-  redaction, and provider error text may be sensitive. Exit codes and
-  `manifests/run.json` carry failure detail.
+- No `progress` percentage, and no `msg` on `error` or on the companion's
+  terminal state: base64 is an encoding, not redaction, and provider error text
+  may be sensitive. Exit codes and `manifests/run.json` carry failure detail.
 - No status for failures before the reporter exists (config/context loading,
   resume-lock contention). Use the process contract instead.
 - Sequences are written only when stdout is an interactive terminal, so piped
@@ -131,18 +155,22 @@ observational, and the scope boundary above is unchanged: `blocked` is still
 never emitted, and the hold reports the run's real `done` or `error` outcome. See
 [HERDR.md](./HERDR.md#holding-the-run-open).
 
-Tier 3 (mod) can consume `manifests/run.json` directly from disk, avoiding any
-crewplane JSON-output work; a `runs list --json` flag is only needed if the mod
-prefers the CLI surface. Known mod constraints from the generated typings
+Tier 3 (mod) can read the companion record the run's own root points at,
+instead of `manifests/run.json` on disk: it is terminal-verified and works for
+wrapper launches and parallel runs. The `spaces-agents` mod reads it for its
+Crewplane row; its contract is documented in that mod's `README.md`. Reading
+`manifests/run.json` directly remains an option for post-run detail such as node
+outcomes about provider failures. Known mod constraints from the generated typings
 (`herdr-extension/mods/blueprint/gpui-kit.d.ts:22190-22400`): `exec()` caps at
 30 s / 8 MiB (launch-and-poll via `hc --json`, not held subprocesses), and
 whether mods can host resident background services is unverified.
 
 ## Gaps and assumptions
 
-- Tier 2 implements the OSC 7501 fields `state`, `app`, and base64 `msg`. The
-  `kind` (blocked subtypes) and `progress` fields stay unused in v1, so host
-  support for them is unverified against a real herdr-core.
+- Tier 2 implements the OSC 7501 fields `state`, `app`, base64 `msg`, the root
+  pointer `title`, and the companion record's `id` and `title`. The `kind`
+  (blocked subtypes) and `progress` fields stay unused in v1, so host support
+  for them is unverified against a real herdr-core.
 - herdr-core and herdr-app source unavailable locally; internals rest on docs,
   the `hc` skill manual, generated typings, and consumer mods.
 - `herdr` (older TUI multiplexer) and herdr-core (`hc`) are distinct CLIs;
@@ -157,4 +185,5 @@ whether mods can host resident background services is unverified.
    `hc file read`.
 2. Verify tier 2 against a real herdr-core (`hc run --bg` + `hc events`) with
    `settings.integrations.status.implementation: "osc7501"`.
-3. Defer tier 3 until a results view in the herdr-app window is actually wanted.
+3. Tier 3's row consumes the verified companion record; extend it only for
+   post-run detail that the record does not carry.

@@ -75,11 +75,28 @@ def _status_pairs(console_text: str) -> list[dict[str, str]]:
 
 
 def _root_pairs(console_text: str) -> list[dict[str, str]]:
-    return [pairs for pairs in _status_pairs(console_text) if "id" not in pairs]
+    return [
+        pairs
+        for pairs in _status_pairs(console_text)
+        if "id" not in pairs and pairs["state"] != "clear"
+    ]
+
+
+def _record_clear_pairs(console_text: str) -> list[dict[str, str]]:
+    return [
+        pairs
+        for pairs in _status_pairs(console_text)
+        if "id" in pairs and pairs["state"] == "clear"
+    ]
 
 
 def _companion_pairs(console_text: str) -> list[dict[str, str]]:
-    return [pairs for pairs in _status_pairs(console_text) if "id" in pairs]
+    """Titled companion records; the untitled startup replacement is not one."""
+    return [
+        pairs
+        for pairs in _status_pairs(console_text)
+        if "id" in pairs and pairs["state"] != "clear" and "title" in pairs
+    ]
 
 
 def _terminal_pairs(console_text: str) -> list[dict[str, str]]:
@@ -92,6 +109,30 @@ def _terminal_pairs(console_text: str) -> list[dict[str, str]]:
 
 def _decoded_message(pairs: dict[str, str]) -> str:
     return base64.b64decode(pairs["msg"]).decode("utf-8")
+
+
+def _decoded_title(pairs: dict[str, str]) -> str:
+    return base64.b64decode(pairs["title"]).decode("utf-8")
+
+
+def _encoded(text: str) -> str:
+    return base64.b64encode(text.encode("utf-8")).decode("ascii")
+
+
+def _marked_root(state: str, run_id: str) -> dict[str, str]:
+    """One root report that names its companion record by the exact run id."""
+
+    return {
+        "state": state,
+        "app": "crewplane",
+        "title": _encoded(f"crewplane/{run_id}"),
+    }
+
+
+def _only_run_id(root: Path) -> str:
+    (run_dir,) = run_directories(root)
+    manifest = json.loads((run_dir / "manifests/run.json").read_text(encoding="utf-8"))
+    return manifest["run_id"]
 
 
 class _TerminalStreamBreakingAtTheTerminalState:
@@ -160,12 +201,99 @@ def test_successful_run_reports_working_then_done(
     assert pairs[0]["state"] == "working"
     assert pairs[0]["app"] == "crewplane"
     assert _decoded_message(pairs[0]) == "Task"
-    assert pairs[-1] == {"state": "done", "app": "crewplane"}
-    assert _terminal_pairs(stream.getvalue()) == [{"state": "done", "app": "crewplane"}]
+    assert pairs[-1] == _marked_root("done", _only_run_id(tmp_path))
+    assert _terminal_pairs(stream.getvalue()) == [
+        _marked_root("done", _only_run_id(tmp_path))
+    ]
     assert {_decoded_message(working) for working in pairs[:-1]} == {
         "Task",
         "build.node",
     }
+
+
+def test_successful_run_reports_one_companion_record(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status_console: tuple[Console, io.StringIO],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    console, stream = status_console
+
+    asyncio.run(run_workflow(runner_workflow(), _status_config(), console))
+
+    run_id = _only_run_id(tmp_path)
+    companions = _companion_pairs(stream.getvalue())
+
+    assert companions
+    assert {pairs["id"] for pairs in companions} == {f"crewplane/{run_id}"}
+    assert {pairs["app"] for pairs in companions} == {"crewplane"}
+    assert {_decoded_title(pairs) for pairs in companions} == {"workflow"}
+    assert "msg" not in companions[0]
+    assert {_decoded_message(pairs) for pairs in companions if "msg" in pairs} == {
+        "build.node"
+    }
+    assert companions[-1] == {
+        "state": "done",
+        "id": f"crewplane/{run_id}",
+        "app": "crewplane",
+        "title": base64.b64encode(b"workflow").decode("ascii"),
+    }
+
+
+def test_a_marked_run_replaces_its_exact_record_before_its_first_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status_console: tuple[Console, io.StringIO],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    console, stream = status_console
+
+    asyncio.run(run_workflow(runner_workflow(), _status_config(), console))
+
+    key = _only_run_id(tmp_path)
+    run_id = f"crewplane/{key}"
+    first_three = _status_pairs(stream.getvalue())[:3]
+
+    assert first_three[0] == {"state": "idle", "id": run_id, "app": "crewplane"}
+    assert first_three[1] == {
+        "state": "working",
+        "app": "crewplane",
+        "title": base64.b64encode(run_id.encode()).decode("ascii"),
+        "msg": base64.b64encode(b"Task").decode("ascii"),
+    }
+    assert first_three[2]["state"] == "working"
+    assert first_three[2]["id"] == run_id
+    assert _decoded_title(first_three[2]) == "workflow"
+    assert _record_clear_pairs(stream.getvalue()) == []
+    assert {_decoded_title(pairs) for pairs in _root_pairs(stream.getvalue())} == {
+        run_id
+    }
+
+
+def test_force_run_reports_the_resolved_workflow_basename(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status_console: tuple[Console, io.StringIO],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    console, stream = status_console
+
+    asyncio.run(
+        run_workflow(
+            runner_workflow(),
+            _status_config(),
+            console,
+            force=True,
+            workflow_path=Path.cwd()
+            / ".crewplane"
+            / "workflows"
+            / "discovered.task.md",
+        )
+    )
+
+    companions = _companion_pairs(stream.getvalue())
+    assert companions
+    assert {_decoded_title(pairs) for pairs in companions} == {"discovered"}
 
 
 def test_failed_run_reports_error_without_message(
@@ -182,8 +310,14 @@ def test_failed_run_reports_error_without_message(
         asyncio.run(run_workflow(runner_workflow(), config, console))
 
     assert _terminal_pairs(stream.getvalue()) == [
-        {"state": "error", "app": "crewplane"}
+        _marked_root("error", _only_run_id(tmp_path))
     ]
+    assert _companion_pairs(stream.getvalue())[-1] == {
+        "state": "error",
+        "id": f"crewplane/{_only_run_id(tmp_path)}",
+        "app": "crewplane",
+        "title": base64.b64encode(b"workflow").decode("ascii"),
+    }
 
 
 def test_export_failure_after_scheduling_reports_error(
@@ -203,7 +337,7 @@ def test_export_failure_after_scheduling_reports_error(
         asyncio.run(run_workflow(runner_workflow(), _status_config(), console))
 
     assert _terminal_pairs(stream.getvalue()) == [
-        {"state": "error", "app": "crewplane"}
+        _marked_root("error", _only_run_id(tmp_path))
     ]
 
 
@@ -242,7 +376,9 @@ def test_cancelled_run_reports_idle(
             )
         )
 
-    assert _terminal_pairs(stream.getvalue()) == [{"state": "idle", "app": "crewplane"}]
+    assert _terminal_pairs(stream.getvalue()) == [
+        _marked_root("idle", _only_run_id(tmp_path))
+    ]
 
 
 def test_required_observer_shutdown_failure_reports_error(
@@ -264,7 +400,7 @@ def test_required_observer_shutdown_failure_reports_error(
         )
 
     assert _terminal_pairs(stream.getvalue()) == [
-        {"state": "error", "app": "crewplane"}
+        _marked_root("error", _only_run_id(tmp_path))
     ]
 
 
@@ -287,7 +423,7 @@ def test_manifest_publication_failure_reports_error(
         asyncio.run(run_workflow(runner_workflow(), _status_config(), console))
 
     assert _terminal_pairs(stream.getvalue()) == [
-        {"state": "error", "app": "crewplane"}
+        _marked_root("error", _only_run_id(tmp_path))
     ]
 
 
@@ -314,10 +450,13 @@ def test_terminal_write_failure_warns_without_changing_the_run_result(
     manifest = json.loads((run_dir / "manifests/run.json").read_text(encoding="utf-8"))
     assert manifest["status"] == "succeeded"
     assert any(b"state=working" in sequence for sequence in attempts)
+    marked_done = status_adapter.format_status_sequence(
+        "done", title=f"crewplane/{manifest['run_id']}"
+    )
     assert [sequence for sequence in attempts if b"state=done" in sequence] == [
-        status_adapter.format_status_sequence("done")
+        marked_done
     ]
-    assert attempts[-1] == status_adapter.format_status_sequence("done")
+    assert attempts[-1] == marked_done
     assert "\x1b]7501;state=done" not in stream.getvalue()
     assert "status reporting failed after run completion" in stream.getvalue()
 
@@ -384,7 +523,9 @@ def test_status_observer_cannot_cancel_the_run_after_composition(
     (run_dir,) = run_directories(tmp_path)
     manifest = json.loads((run_dir / "manifests/run.json").read_text(encoding="utf-8"))
     assert manifest["status"] == "succeeded"
-    assert _terminal_pairs(stream.getvalue()) == [{"state": "done", "app": "crewplane"}]
+    assert _terminal_pairs(stream.getvalue()) == [
+        _marked_root("done", _only_run_id(tmp_path))
+    ]
 
 
 def test_reporter_write_failure_leaves_execution_and_event_log_unaffected(
@@ -410,6 +551,9 @@ def test_reporter_write_failure_leaves_execution_and_event_log_unaffected(
     assert manifest["status"] == "succeeded"
     assert "workflow_finished" in event_types
     assert write_attempts.call_count == 1
+    assert write_attempts.call_args.args[1] == status_adapter.format_status_sequence(
+        "idle", record_id=f"crewplane/{_only_run_id(tmp_path)}"
+    )
     assert "\x1b]7501;" not in stream.getvalue()
     assert "observability observer disabled after error" in stream.getvalue()
 
@@ -480,6 +624,11 @@ def test_repeated_passes_report_status_per_pass(
     assert [run_pairs[-1]["state"] for run_pairs in passes] == ["done", "done"]
     for run_pairs in passes:
         assert any(pair["state"] == "working" for pair in run_pairs[:-1])
+    companions = _companion_pairs(stream.getvalue())
+    assert {pairs["id"] for pairs in companions} == {
+        f"crewplane/{manifest['run_id']}" for manifest in project.manifests()
+    }
+    assert {_decoded_title(pairs) for pairs in companions} == {"repeat"}
 
 
 def test_default_status_integration_emits_no_sequences(
@@ -643,9 +792,42 @@ def test_hold_keeps_the_terminal_state_then_clears_it(
     assert dismissal.calls == ["done"]
     states = [pairs["state"] for pairs in _status_pairs(stream.getvalue())]
     assert states[-2:] == ["done", "clear"]
-    assert states.count("clear") == 1
-    assert _terminal_pairs(stream.getvalue()) == [{"state": "done", "app": "crewplane"}]
+    assert [
+        pairs for pairs in _status_pairs(stream.getvalue()) if pairs["state"] == "clear"
+    ] == [{"state": "clear"}]
+    assert _terminal_pairs(stream.getvalue()) == [
+        _marked_root("done", _only_run_id(tmp_path))
+    ]
     assert HOLD_PROMPT in stream.getvalue()
+
+
+def test_hold_keeps_the_companion_metadata_until_the_global_clear(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, stream = _hold_project(tmp_path, monkeypatch, hold_after_run=True)
+    seen_at_hold: list[dict[str, str]] = []
+
+    def read_key() -> str:
+        seen_at_hold.extend(_companion_pairs(stream.getvalue()))
+        return "a"
+
+    _patch_hold_input(monkeypatch, read_key)
+
+    result = project.run("--hold")
+
+    assert result.exit_code == 0, (result.output, result.exception)
+    run_id = f"crewplane/{_only_run_id(tmp_path)}"
+    assert seen_at_hold
+    assert {pairs["id"] for pairs in seen_at_hold} == {run_id}
+    assert {_decoded_title(pairs) for pairs in seen_at_hold} == {"repeat"}
+    assert seen_at_hold[-1] == {
+        "state": "done",
+        "id": run_id,
+        "app": "crewplane",
+        "title": base64.b64encode(b"repeat").decode("ascii"),
+    }
+    assert _record_clear_pairs(stream.getvalue()) == []
+    assert _status_pairs(stream.getvalue())[-1] == {"state": "clear"}
 
 
 def test_piped_run_never_prompts_or_clears(
@@ -698,10 +880,9 @@ def test_hold_preserves_the_exit_code(
     assert held.exit_code == unheld.exit_code, (held.output, held.exception)
     assert unheld_reads == []
     assert HOLD_PROMPT not in unheld_stream.getvalue()
-    assert _root_pairs(unheld_stream.getvalue())[-1] == {
-        "state": expected_state,
-        "app": "crewplane",
-    }
+    assert _root_pairs(unheld_stream.getvalue())[-1] == _marked_root(
+        expected_state, _only_run_id(tmp_path / "opted-out")
+    )
     assert dismissal.calls == [expected_state]
     assert HOLD_PROMPT in held_stream.getvalue()
     assert _status_pairs(held_stream.getvalue())[-1] == {"state": "clear"}
@@ -760,10 +941,9 @@ def test_omitted_flag_keeps_a_disabled_config_default(
     assert result.exit_code == 0, (result.output, result.exception)
     assert reads == []
     assert HOLD_PROMPT not in stream.getvalue()
-    assert _root_pairs(stream.getvalue())[-1] == {
-        "state": "done",
-        "app": "crewplane",
-    }
+    assert _root_pairs(stream.getvalue())[-1] == _marked_root(
+        "done", _only_run_id(tmp_path)
+    )
 
 
 def test_dismissal_clears_the_status_without_a_status_integration(

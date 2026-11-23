@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 from rich.console import Console
 
 from crewplane.architecture.contracts import (
@@ -71,10 +69,9 @@ class NullStatusReporter:
         run_id: str,
         console: Console,
         options: JsonObject | None = None,
-        workflow_path: Path | None = None,
     ) -> NullStatusObserver:
         """Return an observer that publishes no status sequences."""
 
-        validate_reporter_request(config, run_id, console, workflow_path)
+        validate_reporter_request(config, run_id, console)
         self.canonicalize_options("none", self.__class__.__module__, options)
         return NullStatusObserver()

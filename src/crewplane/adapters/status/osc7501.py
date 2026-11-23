@@ -95,6 +95,18 @@ def write_clear_status(console: Console) -> None:
     write_status_sequence(console, _CLEAR_SEQUENCE)
 
 
+def format_clear_sequence(record_id: str | None = None) -> bytes:
+    """Render a clear: one record and its descendants, or every record without an id."""
+
+    if record_id is None:
+        return _CLEAR_SEQUENCE
+    return (
+        _OSC_INTRODUCER
+        + f"state=clear:id={record_id}".encode("ascii")
+        + _STRING_TERMINATOR
+    )
+
+
 def _encode_text(text: str) -> str:
     return base64.b64encode(text.encode("utf-8")).decode("ascii")
 
@@ -163,6 +175,19 @@ class Osc7501StatusObserver:
         self._write = write_status_sequence if writer is None else writer
         self._record_id = record_id
         self._title = title
+        # The root names the companion it reports: without one it carries no title.
+        self._root_title = (
+            record_id if record_id is not None and title is not None else None
+        )
+        # A run id can repeat across workflows, so a record left at this exact key
+        # by an older run is replaced once, before this run's first report. An
+        # untitled idle report replaces that one record; a clear would remove its
+        # descendants too.
+        self._pending_invalidation = (
+            format_status_sequence("idle", record_id=record_id)
+            if self._root_title is not None
+            else None
+        )
         self._published: tuple[bytes, ...] | None = None
         self._terminal_published = False
         self._write_failed = False
@@ -182,7 +207,7 @@ class Osc7501StatusObserver:
         if self._terminal_published or _is_terminal_event(event):
             return
         self._publish(
-            format_status_sequence("working", msg=_activity_label(snapshot.state)),
+            self._root_sequence("working", msg=_activity_label(snapshot.state)),
             self._companion_sequence("working", msg=_running_node(snapshot.state)),
         )
 
@@ -201,9 +226,16 @@ class Osc7501StatusObserver:
         self._terminal_published = True
         state = _TERMINAL_STATES[result.status]
         self._publish(
-            format_status_sequence(state),
+            self._root_sequence(state),
             self._companion_sequence(state),
         )
+
+    def _root_sequence(
+        self,
+        state: StatusState,
+        msg: str | None = None,
+    ) -> bytes:
+        return format_status_sequence(state, msg=msg, title=self._root_title)
 
     def _companion_sequence(
         self,
@@ -221,6 +253,8 @@ class Osc7501StatusObserver:
 
     def _publish(self, *sequences: bytes | None) -> None:
         selected = tuple(sequence for sequence in sequences if sequence is not None)
+        if self._pending_invalidation is not None:
+            selected = (self._pending_invalidation, *selected)
         if self._write_failed or selected == self._published:
             return
         self._published = selected
@@ -230,6 +264,7 @@ class Osc7501StatusObserver:
         except Exception:
             self._write_failed = True
             raise
+        self._pending_invalidation = None
 
 
 class Osc7501StatusReporter:
@@ -259,9 +294,27 @@ class Osc7501StatusReporter:
         run_id: str,
         console: Console,
         options: JsonObject | None = None,
-        workflow_path: Path | None = None,
     ) -> Osc7501StatusObserver:
-        """Return an observer that publishes OSC 7501 lifecycle sequences."""
+        """Return an observer that publishes the root lifecycle record only.
+
+        The root carries no companion pointer, so a run created through the
+        original factory reports no workflow identity.
+        """
+
+        validate_reporter_request(config, run_id, console)
+        self.canonicalize_options("osc7501", self.__class__.__module__, options)
+        return Osc7501StatusObserver(console)
+
+    def create_reporter_for_workflow(
+        self,
+        config: Config,
+        run_id: str,
+        console: Console,
+        options: JsonObject | None = None,
+        *,
+        workflow_path: Path,
+    ) -> Osc7501StatusObserver:
+        """Return an observer whose root points at its workflow's companion record."""
 
         validate_reporter_request(config, run_id, console, workflow_path)
         self.canonicalize_options("osc7501", self.__class__.__module__, options)
